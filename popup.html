@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Vuln Scanner Ultimate</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Vuln Scanner Ultimate</h1>
+      <div id="score" class="score">--</div>
+    </div>
+    <div class="header-actions">
+      <button id="exportBtn" title="Export JSON">Export</button>
+      <button id="scanBtn">Scan Page</button>
+    </div>
+  </div>
+
+  <div id="status">Click "Scan Page" to analyze this tab</div>
+
+  <div id="summaryBar" class="summary-bar" style="display:none;">
+    <span class="sum high" id="sumHigh">0 High</span>
+    <span class="sum medium" id="sumMed">0 Medium</span>
+    <span class="sum low" id="sumLow">0 Low</span>
+    <span class="sum info" id="sumInfo">0 Info</span>
+  </div>
+
+  <div class="filters">
+    <button class="filter active" data-sev="all">All</button>
+    <button class="filter" data-sev="high">High</button>
+    <button class="filter" data-sev="medium">Medium</button>
+    <button class="filter" data-sev="low">Low</button>
+    <button class="filter" data-sev="info">Info</button>
+  </div>
+
+  <div id="headerSection" class="header-section" style="display:none;">
+    <div class="section-title">Security Headers</div>
+    <div id="headerResults"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
