@@ -302,6 +302,44 @@ kbd {
 .status.missing { background: #2a0f16; color: var(--red); }
 .status.weak { background: #2a2208; color: var(--yellow); }
 
+.header-section {
+  margin-top: 14px;
+  color: var(--green);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+}
+
+.findings-head {
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.bucket-filters {
+  display: flex;
+  gap: 6px;
+}
+
+.bucket-filter {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bucket-filter.active {
+  background: #0a1f18;
+  border-color: #134d38;
+  color: var(--green);
+}
+
+.bucket-filter span {
+  margin-left: 3px;
+}
+
 .filters { display: flex; gap: 6px; }
 .filter {
   background: transparent;
@@ -339,6 +377,7 @@ kbd {
   font-size: 13px;
   margin-bottom: 4px;
 }
+.finding-title { min-width: 0; }
 .finding .detail {
   color: var(--muted);
   font-size: 12px;
@@ -369,6 +408,40 @@ kbd {
 .severity.medium { background: #2a2208; color: var(--yellow); }
 .severity.low { background: #0c1e33; color: var(--blue); }
 .severity.info { background: #151c28; color: var(--muted); }
+
+.confidence,
+.occurrences {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-family: "JetBrains Mono", monospace;
+  white-space: nowrap;
+}
+.confidence.high { color: var(--green); background: #0a2a1c; }
+.confidence.medium { color: var(--yellow); background: #2a2208; }
+.confidence.low { color: var(--muted); background: #151c28; }
+.occurrences { color: var(--muted); border: 1px solid var(--border); }
+
+.finding-context {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.finding-context summary {
+  color: var(--green);
+  cursor: pointer;
+  width: fit-content;
+}
+.finding-context > div { margin-top: 6px; }
+.finding-context strong { color: var(--text); }
+.finding-source {
+  color: #4a5d71;
+  font-family: "JetBrains Mono", monospace;
+  text-transform: uppercase;
+  font-size: 9px;
+}
 
 .copy-btn {
   margin-left: auto;
@@ -460,3 +533,4 @@ kbd {
   margin-bottom: 10px;
   letter-spacing: 0.5px;
 }
+

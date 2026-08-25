@@ -1,0 +1,175 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const test = require("node:test");
+const vm = require("node:vm");
+
+const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const backgroundSource = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
+
+function createWorker(shared) {
+  const state = shared || { local: {}, session: {} };
+  const listeners = {};
+  const chrome = {
+    webRequest: {
+      onBeforeRequest: { addListener: function (listener) { listeners.beforeRequest = listener; } },
+      onHeadersReceived: { addListener: function (listener) { listeners.headers = listener; } },
+      onBeforeRedirect: { addListener: function (listener) { listeners.redirect = listener; } }
+    },
+    action: { onClicked: { addListener: function () {} } },
+    runtime: {
+      getURL: function (value) { return "chrome-extension://test/" + value; },
+      onMessage: { addListener: function (listener) { listeners.message = listener; } },
+      onInstalled: { addListener: function (listener) { listeners.installed = listener; } },
+      lastError: null
+    },
+    storage: {
+      local: {
+        set: function (value, callback) { Object.assign(state.local, value); if (callback) callback(); },
+        get: function (key, callback) { callback({ [key]: state.local[key] }); },
+        remove: function (key, callback) { delete state.local[key]; if (callback) callback(); }
+      },
+      session: {
+        set: function (value, callback) { Object.assign(state.session, value); if (callback) callback(); },
+        get: function (key, callback) { callback({ [key]: state.session[key] }); },
+        remove: function (key, callback) { delete state.session[key]; if (callback) callback(); }
+      }
+    },
+    tabs: {
+      query: async function () { return []; },
+      update: async function () {},
+      create: async function () {},
+      get: function () {},
+      onRemoved: { addListener: function (listener) { listeners.removed = listener; } },
+      onReplaced: { addListener: function (listener) { listeners.replaced = listener; } }
+    },
+    windows: { update: async function () {} }
+  };
+  const context = { chrome: chrome, URL: URL, Date: Date, importScripts: function () {} };
+  vm.createContext(context);
+  vm.runInContext(modelSource, context);
+  vm.runInContext(backgroundSource, context);
+
+  function send(message, sender) {
+    return new Promise(function (resolve) {
+      let resolved = false;
+      const response = function (value) {
+        resolved = true;
+        resolve(value);
+      };
+      const pending = listeners.message(message, sender || { url: "chrome-extension://test/dashboard.html" }, response);
+      if (pending !== true && !resolved) resolve(undefined);
+    });
+  }
+  return { state: state, listeners: listeners, send: send, model: context.VulnscanFindings };
+}
+
+test("keeps raw secrets in session storage across worker restarts", async function () {
+  const shared = { local: {}, session: {} };
+  const first = createWorker(shared);
+  await first.send({ type: "scan_begin", scanId: "scan-1", tabId: 7, origin: "https://example.test" });
+  await first.send({
+    type: "export_secrets",
+    scanId: "scan-1",
+    url: "https://example.test/page",
+    secrets: ["Stripe: raw-one", "Stripe: raw-one", "Stripe: raw-two"]
+  });
+  const second = createWorker(shared);
+  const restored = await second.send({
+    type: "get_export_secrets",
+    scanId: "scan-1",
+    urlFingerprint: second.model.key("https://example.test/page")
+  });
+  assert.deepEqual(Array.from(restored.secrets), ["Stripe: raw-one", "Stripe: raw-two"]);
+
+  const wrongScan = await second.send({
+    type: "get_export_secrets",
+    scanId: "scan-2",
+    urlFingerprint: second.model.key("https://example.test/page")
+  });
+  assert.deepEqual(Array.from(wrongScan.secrets), []);
+
+  await second.send({ type: "scan_begin", scanId: "scan-2", tabId: 7, origin: "https://example.test" });
+  assert.equal(shared.session.secretVault, undefined);
+});
+
+test("does not relay session secrets to a content-script sender", async function () {
+  const worker = createWorker();
+  await worker.send({
+    type: "export_secrets",
+    scanId: "scan-1",
+    url: "https://example.test/",
+    secrets: ["raw-value"]
+  }, { url: "https://example.test/" });
+  const response = await worker.send({
+    type: "get_export_secrets",
+    scanId: "scan-1",
+    urlFingerprint: worker.model.key("https://example.test/")
+  }, { url: "https://example.test/" });
+  assert.equal(response.error, "Extension page required");
+  assert.equal(response.secrets, undefined);
+});
+
+test("never copies unknown secret fields into local scan storage", async function () {
+  const worker = createWorker();
+  await worker.send({
+    type: "scan_results",
+    scanId: "scan-1",
+    url: "https://example.test/?token=raw-value",
+    findings: [{
+      checkId: "secret.test",
+      severity: "high",
+      confidence: "high",
+      bucket: "finding",
+      type: "Possible secret",
+      detail: "hidden",
+      evidence: "redacted",
+      exportDetail: "raw-value",
+      full: "raw-value"
+    }]
+  });
+  assert.equal(JSON.stringify(worker.state.local).includes("raw-value"), false);
+  assert.equal(worker.state.local.lastScan.schemaVersion, 2);
+  assert.equal(worker.state.local.lastScan.scanId, "scan-1");
+  assert.match(worker.state.local.lastScan.url, /token=%5Bredacted%5D/);
+});
+
+test("removes incompatible cached scans during an extension update", function () {
+  const shared = {
+    local: {
+      lastScan: {
+        url: "https://example.test/",
+        findings: [{ type: "Possible secret", detail: "raw-value", exportDetail: "raw-value" }]
+      },
+      scanHistory: [{ url: "https://example.test/", findingsCount: 1 }]
+    },
+    session: { secretVault: { secrets: ["raw-value"] } }
+  };
+  const worker = createWorker(shared);
+  worker.listeners.installed({ reason: "update" });
+  assert.equal(shared.local.lastScan, undefined);
+  assert.equal(shared.session.secretVault, undefined);
+  assert.equal(shared.local.scanHistory.length, 1);
+});
+
+test("clears cached headers at navigation and tab lifecycle boundaries", async function () {
+  const worker = createWorker();
+  worker.listeners.headers({
+    tabId: 4,
+    type: "main_frame",
+    url: "https://example.test/",
+    statusCode: 200,
+    responseHeaders: [{ name: "set-cookie", value: "a=1" }, { name: "set-cookie", value: "b=2" }]
+  });
+  let captured = await worker.send({ type: "get_headers", tabId: 4 });
+  assert.equal(captured.headers.length, 2);
+  worker.listeners.beforeRequest({ tabId: 4, type: "main_frame" });
+  captured = await worker.send({ type: "get_headers", tabId: 4 });
+  assert.equal(captured.statusCode, 0);
+
+  worker.listeners.headers({ tabId: 4, type: "main_frame", url: "https://example.test/", statusCode: 200, responseHeaders: [] });
+  worker.listeners.removed(4);
+  captured = await worker.send({ type: "get_headers", tabId: 4 });
+  assert.equal(captured.statusCode, 0);
+});
+

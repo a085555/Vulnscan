@@ -1,7 +1,61 @@
+importScripts("finding-model.js");
+
 const headerCache = {};
 let redirectCache = {};
 let currentScan = null;
-let secretVaultMemory = [];
+const vaultKey = "secretVault";
+
+function comparableUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.href;
+  } catch (e) {
+    return "";
+  }
+}
+
+function redactUrl(value) {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    url.pathname = url.pathname.split("/").map(function (part) {
+      return part.length >= 20 && /^[A-Za-z0-9._~-]+$/.test(part) ? "[redacted]" : part;
+    }).join("/");
+    Array.from(url.searchParams.keys()).forEach(function (name) {
+      url.searchParams.set(name, "[redacted]");
+    });
+    return url.href;
+  } catch (e) {
+    return "";
+  }
+}
+
+function urlFingerprint(value) {
+  return VulnscanFindings.key(comparableUrl(value));
+}
+
+function isExtensionPage(sender) {
+  const base = chrome.runtime.getURL("");
+  return !!(sender && sender.url && sender.url.startsWith(base));
+}
+
+function clearVault(callback) {
+  chrome.storage.session.remove(vaultKey, function () {
+    if (callback) callback();
+  });
+}
+
+chrome.webRequest.onBeforeRequest.addListener(
+  function (details) {
+    if (details.tabId >= 0 && details.type === "main_frame") {
+      delete headerCache[details.tabId];
+    }
+  },
+  { urls: ["<all_urls>"], types: ["main_frame"] }
+);
 
 chrome.webRequest.onHeadersReceived.addListener(
   function (details) {
@@ -13,7 +67,7 @@ chrome.webRequest.onHeadersReceived.addListener(
       };
     }
   },
-  { urls: ["<all_urls>"] },
+  { urls: ["<all_urls>"], types: ["main_frame"] },
   ["responseHeaders", "extraHeaders"]
 );
 
@@ -28,15 +82,25 @@ chrome.webRequest.onBeforeRedirect.addListener(
         to: details.redirectUrl,
         status: details.statusCode,
         tabId: details.tabId,
-        scanId: currentScan ? currentScan.id : null,
+        scanId: currentScan.id,
         ts: Date.now()
       };
-      const key = details.url + "->" + details.redirectUrl;
-      redirectCache[key] = entry;
+      redirectCache[details.url + "->" + details.redirectUrl] = entry;
     } catch (e) {}
   },
   { urls: ["<all_urls>"] }
 );
+
+chrome.tabs.onRemoved.addListener(function (tabId) {
+  delete headerCache[tabId];
+});
+
+if (chrome.tabs.onReplaced) {
+  chrome.tabs.onReplaced.addListener(function (addedTabId, removedTabId) {
+    delete headerCache[removedTabId];
+    delete headerCache[addedTabId];
+  });
+}
 
 chrome.action.onClicked.addListener(async function () {
   const url = chrome.runtime.getURL("dashboard.html");
@@ -49,54 +113,83 @@ chrome.action.onClicked.addListener(async function () {
   }
 });
 
+chrome.runtime.onInstalled.addListener(function () {
+  clearVault();
+  chrome.storage.local.get("lastScan", function (data) {
+    if (data.lastScan && data.lastScan.schemaVersion !== 2) {
+      chrome.storage.local.remove("lastScan");
+    }
+  });
+});
+
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+  if (message.type !== "scan_results" && message.type !== "export_secrets" && !isExtensionPage(sender)) {
+    sendResponse({ error: "Extension page required" });
+    return true;
+  }
+
   if (message.type === "scan_results") {
-    // never write raw secrets to storage
-    const findings = (message.findings || []).map(function (f) {
-      return {
-        severity: f.severity,
-        type: f.type,
-        detail: f.detail
-      };
-    });
+    const findings = VulnscanFindings.dedupe(message.findings || []);
+    const summary = VulnscanFindings.summarize(findings);
     chrome.storage.local.set({
       lastScan: {
-        url: message.url,
+        schemaVersion: 2,
+        scanId: message.scanId || null,
+        url: redactUrl(message.url),
+        urlFingerprint: urlFingerprint(message.url),
         findings: findings,
         timestamp: Date.now(),
-        summary: message.summary || {},
-        risk: message.risk || "info"
+        summary: summary,
+        risk: VulnscanFindings.risk(findings)
       }
+    }, function () {
+      sendResponse({ ok: true });
     });
-    return;
+    return true;
   }
 
   if (message.type === "export_secrets") {
-    secretVaultMemory = (message.secrets || []).slice();
-    return;
+    const secrets = Array.from(new Set((message.secrets || []).map(String)));
+    const vault = {
+      scanId: message.scanId || (currentScan && currentScan.id) || null,
+      url: message.url || "",
+      urlFingerprint: urlFingerprint(message.url),
+      secrets: secrets
+    };
+    chrome.storage.session.set({ [vaultKey]: vault }, function () {
+      sendResponse({ ok: true, count: secrets.length });
+    });
+    return true;
   }
 
   if (message.type === "get_export_secrets") {
-    sendResponse({ secrets: secretVaultMemory.slice() });
+    chrome.storage.session.get(vaultKey, function (data) {
+      const vault = data[vaultKey] || null;
+      const sameScan = !!message.scanId && vault && vault.scanId === message.scanId;
+      const sameUrl = !!message.urlFingerprint && vault && vault.urlFingerprint === message.urlFingerprint;
+      sendResponse({
+        secrets: vault && sameScan && sameUrl ? vault.secrets.slice() : [],
+        available: !!(vault && sameScan && sameUrl)
+      });
+    });
     return true;
   }
 
   if (message.type === "clear_export_secrets") {
-    secretVaultMemory = [];
-    sendResponse({ ok: true });
+    clearVault(function () { sendResponse({ ok: true }); });
     return true;
   }
 
   if (message.type === "scan_begin") {
-    secretVaultMemory = [];
     currentScan = {
       id: message.scanId || ("s" + Date.now()),
       tabId: Number.isInteger(message.tabId) ? message.tabId : null,
       origin: message.origin || null
     };
-    // drop old redirects
     redirectCache = {};
-    sendResponse({ ok: true, scanId: currentScan.id });
+    clearVault(function () {
+      sendResponse({ ok: true, scanId: currentScan.id });
+    });
     return true;
   }
 
@@ -114,12 +207,10 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === "get_redirects") {
-    const scanId = message.scanId;
-    const out = [];
-    Object.keys(redirectCache).forEach(function (k) {
-      const e = redirectCache[k];
-      if (scanId && e.scanId !== scanId) return;
-      out.push(e);
+    const out = Object.keys(redirectCache).map(function (key) {
+      return redirectCache[key];
+    }).filter(function (entry) {
+      return !message.scanId || entry.scanId === message.scanId;
     });
     sendResponse({ redirects: out });
     return true;
@@ -127,24 +218,22 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
   if (message.type === "list_tabs") {
     chrome.tabs.query({}, function (tabs) {
-      const list = (tabs || [])
-        .filter(function (t) {
-          return t.url &&
-            !t.url.startsWith("chrome://") &&
-            !t.url.startsWith("chrome-extension://") &&
-            !t.url.startsWith("edge://") &&
-            !t.url.startsWith("about:") &&
-            !t.url.startsWith("devtools://");
-        })
-        .map(function (t) {
-          return {
-            id: t.id,
-            title: t.title || t.url,
-            url: t.url,
-            active: !!t.active,
-            favIconUrl: t.favIconUrl || ""
-          };
-        });
+      const list = (tabs || []).filter(function (tab) {
+        return tab.url &&
+          !tab.url.startsWith("chrome://") &&
+          !tab.url.startsWith("chrome-extension://") &&
+          !tab.url.startsWith("edge://") &&
+          !tab.url.startsWith("about:") &&
+          !tab.url.startsWith("devtools://");
+      }).map(function (tab) {
+        return {
+          id: tab.id,
+          title: tab.title || tab.url,
+          url: tab.url,
+          active: !!tab.active,
+          favIconUrl: tab.favIconUrl || ""
+        };
+      });
       sendResponse({ tabs: list });
     });
     return true;
@@ -160,14 +249,5 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     });
     return true;
   }
-
-  if (message.type === "get_active_tab") {
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
-      let tab = (tabs || []).find(function (t) {
-        return t.url && !t.url.startsWith("chrome://") && !t.url.startsWith("chrome-extension://");
-      });
-      sendResponse({ tab: tab || null });
-    });
-    return true;
-  }
 });
+

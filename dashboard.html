@@ -14,7 +14,7 @@
         <div class="logo">◈</div>
         <div>
           <div class="brand-name">VULN<span>SCAN</span></div>
-          <div class="brand-ver">v5.1</div>
+          <div id="brandVersion" class="brand-ver">v5.2.0</div>
           <div class="brand-by">tool by a085</div>
         </div>
       </div>
@@ -97,8 +97,11 @@
           </div>
 
           <div class="panel findings-panel">
-            <div class="panel-head">
-              <span>// FINDINGS</span>
+            <div class="panel-head findings-head">
+              <div class="bucket-filters">
+                <button class="bucket-filter active" data-bucket="finding">FINDINGS <span id="findingsCount">0</span></button>
+                <button class="bucket-filter" data-bucket="review">REVIEW <span id="reviewCount">0</span></button>
+              </div>
               <div class="filters" id="filters">
                 <button class="filter active" data-sev="all">ALL</button>
                 <button class="filter" data-sev="high">HIGH</button>
@@ -134,9 +137,9 @@
           <div class="panel-body about-body">
             <p><strong>VulnScan Ultimate</strong> is a passive + light-active browser scanner.</p>
             <ul>
-              <li>DOM sinks, secrets, CSRF clues, mixed content</li>
+              <li>DOM flows, secrets, form clues, mixed content</li>
               <li>Security header + cookie flag analysis</li>
-              <li>Light reflection / open-redirect / CORS checks</li>
+              <li>Light reflection and confirmed open-redirect checks</li>
               <li>Common path probes + robots/sitemap hints</li>
             </ul>
             <p class="muted">Use only on targets you own or have permission to test.</p>
@@ -147,6 +150,8 @@
     </main>
   </div>
 
+  <script src="finding-model.js"></script>
   <script src="dashboard.js"></script>
 </body>
 </html>
+
