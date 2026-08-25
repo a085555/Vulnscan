@@ -23,6 +23,6 @@ Pick a tab → Scan Selected Tab → review / export
 Shortcuts: S scan · C clear · E export
 
 ## Notes
-Authorized testing only. MIT license.
+Authorized testing only. No license.
 
 Built by a085
