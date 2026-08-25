@@ -1,11 +1,10 @@
 {
   "name": "vulnscan-extension",
-  "version": "5.2.0",
+  "version": "5.3.0",
   "private": true,
   "scripts": {
-    "check": "node --check finding-model.js && node --check background.js && node --check content.js && node --check dashboard.js",
+    "check": "node --check finding-model.js && node --check request-controller.js && node --check background.js && node --check content.js && node --check dashboard.js",
     "test": "node --test",
     "verify": "npm run check && npm test"
   }
 }
-

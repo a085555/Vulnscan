@@ -14,7 +14,7 @@
         <div class="logo">◈</div>
         <div>
           <div class="brand-name">VULN<span>SCAN</span></div>
-          <div id="brandVersion" class="brand-ver">v5.2.0</div>
+          <div id="brandVersion" class="brand-ver">v5.3.0</div>
           <div class="brand-by">tool by a085</div>
         </div>
       </div>
@@ -51,10 +51,32 @@
         </div>
         <div class="top-actions">
           <button id="clearBtn" class="btn ghost">Clear</button>
-          <button id="exportBtn" class="btn ghost">Export</button>
+          <div class="export-wrap">
+            <button id="exportBtn" class="btn ghost" aria-expanded="false">Export</button>
+            <div id="exportMenu" class="export-menu" hidden>
+              <button id="exportMarkdownBtn">Redacted Markdown</button>
+              <button id="exportJsonBtn">Redacted JSON</button>
+              <button id="exportSecretsBtn">Full secret values</button>
+            </div>
+          </div>
+          <button id="cancelScanBtn" class="btn danger" hidden>Cancel</button>
           <button id="scanBtn" class="btn primary">Scan Selected Tab</button>
         </div>
       </header>
+
+      <div class="scan-controls">
+        <label>MODE
+          <select id="scanMode" class="control-select">
+            <option value="passive" selected>Passive</option>
+            <option value="safe">Safe Active</option>
+            <option value="lab">Lab</option>
+          </select>
+        </label>
+        <label>REQUEST BUDGET
+          <input id="requestBudget" type="number" min="5" max="50" value="20">
+        </label>
+        <span id="modeHelp" class="mode-help">No scanner-generated requests.</span>
+      </div>
 
       <!-- Status / progress -->
       <div id="statusBar" class="status-bar">// ready — open a website tab, then hit Scan</div>
@@ -115,6 +137,16 @@
             </div>
           </div>
         </div>
+
+        <div class="panel request-panel">
+          <div class="panel-head">
+            <span>// REQUEST LOG</span>
+            <span id="requestSummary" class="panel-note">Passive mode — no requests</span>
+          </div>
+          <div id="requestLog" class="panel-body request-log">
+            <div class="empty-hint">No scanner-generated requests</div>
+          </div>
+        </div>
       </section>
 
       <!-- HISTORY VIEW -->
@@ -135,13 +167,17 @@
         <div class="panel about-panel">
           <div class="panel-head"><span>// ABOUT</span></div>
           <div class="panel-body about-body">
-            <p><strong>VulnScan Ultimate</strong> is a passive + light-active browser scanner.</p>
+            <p><strong>VulnScan Ultimate</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v5.3.0</strong>.</p>
             <ul>
-              <li>DOM flows, secrets, form clues, mixed content</li>
-              <li>Security header + cookie flag analysis</li>
-              <li>Light reflection and confirmed open-redirect checks</li>
-              <li>Common path probes + robots/sitemap hints</li>
+              <li><strong>Passive</strong> inspects the loaded page without sending scanner-generated requests.</li>
+              <li><strong>Safe Active</strong> allows same-origin GET, HEAD, and OPTIONS checks within a request budget.</li>
+              <li><strong>Lab</strong> adds controlled path discovery for targets you are explicitly authorized to test.</li>
             </ul>
+            <p class="muted">Site access is requested for the exact selected origin so the extension can inspect that tab. Scan reports and history are stored locally. Raw secret values stay in browser session memory and only leave it through the separate full-secret export.</p>
+            <div class="about-actions">
+              <a class="btn ghost link-btn" href="https://github.com/a085555/Vulnscan/releases/latest" target="_blank" rel="noreferrer">Check for updates</a>
+              <button id="clearAllDataBtn" class="btn danger">Clear all data</button>
+            </div>
             <p class="muted">Use only on targets you own or have permission to test.</p>
             <p class="credit">tool by a085</p>
           </div>
@@ -150,8 +186,36 @@
     </main>
   </div>
 
+  <div id="authorizationModal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="authorizationTitle">
+      <div class="panel-head"><span id="authorizationTitle">// CONFIRM ACTIVE SCAN</span></div>
+      <div class="modal-body">
+        <p id="authorizationDetails"></p>
+        <label class="confirm-row"><input id="authorizationCheck" type="checkbox"> I confirm that I own this target or have permission to test it.</label>
+        <div class="modal-actions">
+          <button id="authorizationCancel" class="btn ghost">Cancel</button>
+          <button id="authorizationStart" class="btn primary" disabled>Start scan</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="secretExportModal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="secretExportTitle">
+      <div class="panel-head"><span id="secretExportTitle">// EXPORT RAW SECRET VALUES</span></div>
+      <div class="modal-body">
+        <p>This file may contain live credentials. Store it securely and delete it when it is no longer needed.</p>
+        <label class="confirm-row"><input id="secretExportCheck" type="checkbox"> I understand this export contains unredacted values.</label>
+        <div class="modal-actions">
+          <button id="secretExportCancel" class="btn ghost">Cancel</button>
+          <button id="secretExportConfirm" class="btn danger" disabled>Export values</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="finding-model.js"></script>
+  <script src="request-controller.js"></script>
   <script src="dashboard.js"></script>
 </body>
 </html>
-

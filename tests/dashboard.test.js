@@ -5,6 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const requestSource = fs.readFileSync(path.join(__dirname, "..", "request-controller.js"), "utf8");
 const dashboardSource = fs.readFileSync(path.join(__dirname, "..", "dashboard.js"), "utf8");
 
 function createElement(id, attributes) {
@@ -15,6 +16,8 @@ function createElement(id, attributes) {
     className: "",
     value: "",
     disabled: false,
+    hidden: false,
+    checked: false,
     src: "",
     style: {},
     listeners: {},
@@ -63,6 +66,9 @@ function createDashboard() {
   let tabResponse = tabsResponse[0];
   let headerResponse = { headers: [], url: "", statusCode: 0 };
   let reloadCount = 0;
+  let fetchCount = 0;
+  let exportSecretsResponse = { secrets: [], available: false };
+  let savedRequestLog = { scanId: null, entries: [], summary: null };
   const sentMessages = [];
   const storage = {};
 
@@ -79,7 +85,7 @@ function createDashboard() {
   const chrome = {
     runtime: {
       lastError: null,
-      getManifest: function () { return { version: "5.2.0" }; },
+      getManifest: function () { return { version: "5.3.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -88,7 +94,12 @@ function createDashboard() {
         if (message.type === "get_tab") response = { tab: tabResponse };
         if (message.type === "get_headers") response = headerResponse;
         if (message.type === "get_redirects") response = { redirects: redirectResponse };
-        if (message.type === "get_export_secrets") response = { secrets: [], available: false };
+        if (message.type === "get_export_secrets") response = exportSecretsResponse;
+        if (message.type === "save_request_log") {
+          savedRequestLog = { scanId: message.scanId, entries: message.entries, summary: message.summary };
+          response = { ok: true };
+        }
+        if (message.type === "get_request_log") response = savedRequestLog;
         if (message.type === "scan_begin") currentScanId = message.scanId;
         if (callback) callback(response);
       }
@@ -97,7 +108,10 @@ function createDashboard() {
       local: {
         get: function (key, callback) { callback({ [key]: storage[key] }); },
         set: function (value, callback) { Object.assign(storage, value); if (callback) callback(); },
-        remove: function (key, callback) { delete storage[key]; if (callback) callback(); }
+        remove: function (key, callback) {
+          (Array.isArray(key) ? key : [key]).forEach(function (name) { delete storage[name]; });
+          if (callback) callback();
+        }
       }
     },
     tabs: {
@@ -121,8 +135,9 @@ function createDashboard() {
       executeScript: async function (options) {
         if (options.files && options.files.includes("content.js")) {
           storage.lastScan = {
-            schemaVersion: 2,
+            schemaVersion: 3,
             scanId: currentScanId,
+            scanMode: "passive",
             url: tabResponse.url,
             urlFingerprint: context.VulnscanFindings.key(tabResponse.url),
             findings: [],
@@ -139,6 +154,7 @@ function createDashboard() {
     chrome: chrome,
     navigator: { clipboard: { writeText: async function () {} } },
     fetch: async function () {
+      fetchCount++;
       return {
         status: 404,
         ok: false,
@@ -149,12 +165,15 @@ function createDashboard() {
     URL: URL,
     Blob: Blob,
     AbortController: AbortController,
+    TextEncoder: TextEncoder,
+    TextDecoder: TextDecoder,
     setTimeout: setTimeout,
     clearTimeout: clearTimeout,
     console: console
   };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
+  vm.runInContext(requestSource, context);
   vm.runInContext(dashboardSource, context);
   return {
     context: context,
@@ -165,9 +184,11 @@ function createDashboard() {
     sentMessages: sentMessages,
     storage: storage,
     setRedirects: function (value) { redirectResponse = value; },
-    setFetch: function (value) { context.fetch = value; },
+    setFetch: function (value) { context.fetch = async function () { fetchCount++; return value.apply(null, arguments); }; },
     setTabResponse: function (value) { tabResponse = value; },
-    getReloadCount: function () { return reloadCount; }
+    setExportSecrets: function (value) { exportSecretsResponse = value; },
+    getReloadCount: function () { return reloadCount; },
+    getFetchCount: function () { return fetchCount; }
   };
 }
 
@@ -195,7 +216,7 @@ test("renders actionable and review counts separately", function () {
     verification: "verify"
   });
   dashboard.context.renderFindings({
-    schemaVersion: 2,
+    schemaVersion: 3,
     scanId: "scan-1",
     url: "https://example.test/",
     urlFingerprint: model.key("https://example.test/"),
@@ -263,14 +284,70 @@ test("filters dynamic soft-404 templates", async function () {
   assert.match(paths.detail, /\/admin \(200\)/);
 });
 
-test("reloads once for fresh headers and scopes passive results to the scan", async function () {
+test("passive mode sends no scanner requests or target reloads", async function () {
   const dashboard = createDashboard();
   await dashboard.context.loadTabs();
   await dashboard.context.runScan();
-  assert.equal(dashboard.getReloadCount(), 1);
-  assert.equal(dashboard.storage.lastScan.schemaVersion, 2);
+  assert.equal(dashboard.getReloadCount(), 0);
+  assert.equal(dashboard.getFetchCount(), 0);
+  assert.equal(dashboard.storage.lastScan.schemaVersion, 3);
+  assert.equal(dashboard.storage.lastScan.scanMode, "passive");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_begin"; }), true);
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_end"; }), true);
+});
+
+test("safe active mode requires confirmation and uses its request budget", async function () {
+  const dashboard = createDashboard();
+  dashboard.element("scanMode").value = "safe";
+  dashboard.element("requestBudget").value = "20";
+  await dashboard.context.loadTabs();
+  const scan = dashboard.context.runScan();
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  assert.equal(dashboard.element("authorizationModal").hidden, false);
+  assert.equal(dashboard.getFetchCount(), 0);
+  dashboard.element("authorizationCheck").checked = true;
+  dashboard.element("authorizationCheck").listeners.change();
+  dashboard.element("authorizationStart").listeners.click();
+  await scan;
+  assert.equal(dashboard.getFetchCount(), 13);
+  assert.equal(dashboard.storage.lastScan.scanMode, "safe");
+  assert.equal(dashboard.storage.lastScan.requestSummary.attempted, 13);
+});
+
+test("redacted reports never include raw secret values", function () {
+  const dashboard = createDashboard();
+  const model = dashboard.context.VulnscanFindings;
+  const raw = "sk_live_" + "Z".repeat(24);
+  const scan = {
+    schemaVersion: 3,
+    scanId: "scan-export",
+    scanMode: "passive",
+    url: "https://example.test/",
+    urlFingerprint: model.key("https://example.test/"),
+    timestamp: Date.now(),
+    findings: [model.normalize({
+      checkId: "secret.stripe",
+      severity: "high",
+      confidence: "high",
+      bucket: "finding",
+      category: "secrets",
+      type: "Possible secret",
+      detail: "Stripe key (1 distinct value hidden)",
+      evidence: "Value hidden"
+    })]
+  };
+  dashboard.context.renderFindings(scan);
+  dashboard.setExportSecrets({ secrets: [raw], available: true });
+  assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
+  assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
+  assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
+
+  dashboard.element("exportSecretsBtn").listeners.click();
+  assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
+  dashboard.element("secretExportCheck").checked = true;
+  dashboard.element("secretExportCheck").listeners.change();
+  dashboard.element("secretExportConfirm").listeners.click();
+  assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), true);
 });
 
 test("rejects cached v5.1 scan data", function () {
@@ -280,4 +357,3 @@ test("rejects cached v5.1 scan data", function () {
     findings: [{ severity: "high", type: "Possible secret", detail: "raw-value" }]
   }), null);
 });
-

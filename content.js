@@ -4,6 +4,7 @@
   const pageUrl = location.href;
   const pageLower = pageText.toLowerCase();
   const scanId = globalThis.__vulnscanScanId || null;
+  const scanMode = globalThis.__vulnscanScanMode || "passive";
 
   function add(severity, type, detail, options) {
     const item = options || {};
@@ -393,8 +394,9 @@
   const normalizedFindings = VulnscanFindings.dedupe(findings);
   chrome.runtime.sendMessage({
     type: "scan_results",
-    schemaVersion: 2,
+    schemaVersion: 3,
     scanId: scanId,
+    scanMode: scanMode,
     url: pageUrl,
     findings: normalizedFindings,
     summary: VulnscanFindings.summarize(normalizedFindings),
@@ -411,5 +413,5 @@
   }
 
   delete globalThis.__vulnscanScanId;
+  delete globalThis.__vulnscanScanMode;
 })();
-

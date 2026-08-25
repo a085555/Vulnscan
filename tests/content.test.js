@@ -32,7 +32,8 @@ function scan(options) {
     },
     chrome: { runtime: { sendMessage: function (message) { messages.push(message); } } },
     URL: URL,
-    __vulnscanScanId: "scan-1"
+    __vulnscanScanId: "scan-1",
+    __vulnscanScanMode: settings.mode || "passive"
   };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
@@ -60,6 +61,8 @@ test("exports every distinct secret while keeping one redacted type finding", fu
   assert.equal(vault.secrets.length, 2);
   assert.equal(new Set(vault.secrets).size, 2);
   assert.equal(vault.scanId, "scan-1");
+  assert.equal(result(messages).schemaVersion, 3);
+  assert.equal(result(messages).scanMode, "passive");
 });
 
 test("keeps generic token patterns in review", function () {
@@ -115,4 +118,3 @@ test("separates raw sinks from a source-to-sink flow", function () {
     return finding.checkId === "dom.source-to-sink";
   }), false);
 });
-

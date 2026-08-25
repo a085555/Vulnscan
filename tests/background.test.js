@@ -26,13 +26,24 @@ function createWorker(shared) {
     storage: {
       local: {
         set: function (value, callback) { Object.assign(state.local, value); if (callback) callback(); },
-        get: function (key, callback) { callback({ [key]: state.local[key] }); },
-        remove: function (key, callback) { delete state.local[key]; if (callback) callback(); }
+        get: function (key, callback) {
+          const keys = Array.isArray(key) ? key : [key];
+          const result = {};
+          keys.forEach(function (name) { result[name] = state.local[name]; });
+          callback(result);
+        },
+        remove: function (key, callback) {
+          (Array.isArray(key) ? key : [key]).forEach(function (name) { delete state.local[name]; });
+          if (callback) callback();
+        }
       },
       session: {
         set: function (value, callback) { Object.assign(state.session, value); if (callback) callback(); },
         get: function (key, callback) { callback({ [key]: state.session[key] }); },
-        remove: function (key, callback) { delete state.session[key]; if (callback) callback(); }
+        remove: function (key, callback) {
+          (Array.isArray(key) ? key : [key]).forEach(function (name) { delete state.session[name]; });
+          if (callback) callback();
+        }
       }
     },
     tabs: {
@@ -129,7 +140,7 @@ test("never copies unknown secret fields into local scan storage", async functio
     }]
   });
   assert.equal(JSON.stringify(worker.state.local).includes("raw-value"), false);
-  assert.equal(worker.state.local.lastScan.schemaVersion, 2);
+  assert.equal(worker.state.local.lastScan.schemaVersion, 3);
   assert.equal(worker.state.local.lastScan.scanId, "scan-1");
   assert.match(worker.state.local.lastScan.url, /token=%5Bredacted%5D/);
 });
@@ -152,6 +163,44 @@ test("removes incompatible cached scans during an extension update", function ()
   assert.equal(shared.local.scanHistory.length, 1);
 });
 
+test("migrates v2 scans and history without copying unknown fields", function () {
+  const shared = {
+    local: {
+      lastScan: {
+        schemaVersion: 2,
+        scanId: "old-scan",
+        url: "https://example.test/?token=%5Bredacted%5D",
+        urlFingerprint: "vk-old",
+        timestamp: 10,
+        findings: [{ type: "Review item", detail: "redacted", bucket: "review", raw: "do-not-copy" }],
+        requestSummary: { mode: "safe", attempted: 1, raw: "do-not-copy" }
+      },
+      scanHistory: [{ schemaVersion: 2, url: "https://example.test/", findingsCount: 1, reviewCount: 2, summary: { high: 1, raw: "do-not-copy" }, raw: "do-not-copy" }]
+    },
+    session: {}
+  };
+  const worker = createWorker(shared);
+  worker.listeners.installed({ reason: "update" });
+  assert.equal(shared.local.lastScan.schemaVersion, 3);
+  assert.equal(shared.local.lastScan.scanMode, "legacy");
+  assert.equal(shared.local.scanHistory[0].schemaVersion, 3);
+  assert.equal(JSON.stringify(shared.local).includes("do-not-copy"), false);
+});
+
+test("stores only redacted request-log fields in session storage", async function () {
+  const worker = createWorker();
+  await worker.send({
+    type: "save_request_log",
+    scanId: "scan-1",
+    entries: [{ method: "GET", url: "https://example.test/path?token=raw#secret", status: 200, durationMs: 12, body: "raw-body" }],
+    summary: { mode: "safe", budget: 20, attempted: 1, completed: 1 }
+  });
+  const log = await worker.send({ type: "get_request_log", scanId: "scan-1" });
+  assert.equal(log.entries.length, 1);
+  assert.equal(log.entries[0].durationMs, 12);
+  assert.doesNotMatch(JSON.stringify(log), /raw|secret|body/);
+});
+
 test("clears cached headers at navigation and tab lifecycle boundaries", async function () {
   const worker = createWorker();
   worker.listeners.headers({
@@ -172,4 +221,3 @@ test("clears cached headers at navigation and tab lifecycle boundaries", async f
   captured = await worker.send({ type: "get_headers", tabId: 4 });
   assert.equal(captured.statusCode, 0);
 });
-

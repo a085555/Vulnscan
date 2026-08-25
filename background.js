@@ -4,6 +4,7 @@ const headerCache = {};
 let redirectCache = {};
 let currentScan = null;
 const vaultKey = "secretVault";
+const requestLogKey = "requestLog";
 
 function comparableUrl(value) {
   try {
@@ -45,6 +46,54 @@ function isExtensionPage(sender) {
 function clearVault(callback) {
   chrome.storage.session.remove(vaultKey, function () {
     if (callback) callback();
+  });
+}
+
+function clearSessionData(callback) {
+  chrome.storage.session.remove([vaultKey, requestLogKey], function () {
+    if (callback) callback();
+  });
+}
+
+function cleanRequestSummary(summary, fallbackMode) {
+  const source = summary && typeof summary === "object" ? summary : {};
+  const mode = ["passive", "safe", "lab", "legacy"].includes(source.mode) ? source.mode : fallbackMode;
+  return {
+    mode: mode,
+    budget: Math.max(0, Math.min(50, Number(source.budget) || 0)),
+    attempted: Math.max(0, Number(source.attempted) || 0),
+    completed: Math.max(0, Number(source.completed) || 0),
+    stoppedReason: source.stoppedReason ? String(source.stoppedReason).slice(0, 100) : null
+  };
+}
+
+function migrateScan(scan) {
+  if (!scan || !scan.url || !scan.urlFingerprint || (scan.schemaVersion !== 2 && scan.schemaVersion !== 3)) return null;
+  const findings = VulnscanFindings.dedupe(scan.findings || []);
+  const mode = ["passive", "safe", "lab"].includes(scan.scanMode) ? scan.scanMode : "legacy";
+  return {
+    schemaVersion: 3,
+    scanId: scan.scanId || null,
+    scanMode: mode,
+    url: redactUrl(scan.url),
+    urlFingerprint: scan.urlFingerprint,
+    findings: findings,
+    timestamp: scan.timestamp || Date.now(),
+    summary: VulnscanFindings.summarize(findings),
+    risk: VulnscanFindings.risk(findings),
+    requestSummary: cleanRequestSummary(scan.requestSummary, mode)
+  };
+}
+
+function cleanRequestEntries(entries) {
+  return (entries || []).slice(0, 50).map(function (entry) {
+    return {
+      method: ["GET", "HEAD", "OPTIONS", "POST"].includes(entry.method) ? entry.method : "GET",
+      url: redactUrl(entry.url),
+      status: Number.isInteger(entry.status) ? entry.status : 0,
+      durationMs: Number.isFinite(entry.durationMs) ? Math.max(0, Math.round(entry.durationMs)) : 0,
+      outcome: String(entry.outcome || "unknown").slice(0, 40)
+    };
   });
 }
 
@@ -114,10 +163,35 @@ chrome.action.onClicked.addListener(async function () {
 });
 
 chrome.runtime.onInstalled.addListener(function () {
-  clearVault();
-  chrome.storage.local.get("lastScan", function (data) {
-    if (data.lastScan && data.lastScan.schemaVersion !== 2) {
-      chrome.storage.local.remove("lastScan");
+  clearSessionData();
+  chrome.storage.local.get(["lastScan", "scanHistory"], function (data) {
+    const migrated = migrateScan(data.lastScan);
+    if (migrated) chrome.storage.local.set({ lastScan: migrated });
+    else if (data.lastScan) chrome.storage.local.remove("lastScan");
+
+    if (Array.isArray(data.scanHistory)) {
+      const history = data.scanHistory.map(function (entry) {
+        const mode = ["passive", "safe", "lab"].includes(entry.scanMode) ? entry.scanMode : "legacy";
+        return {
+          schemaVersion: 3,
+          url: redactUrl(entry.url),
+          risk: entry.risk || "legacy",
+          timestamp: entry.timestamp || Date.now(),
+          summary: entry.summary && typeof entry.summary === "object" ? {
+            high: Math.max(0, Number(entry.summary.high) || 0),
+            medium: Math.max(0, Number(entry.summary.medium) || 0),
+            low: Math.max(0, Number(entry.summary.low) || 0),
+            info: Math.max(0, Number(entry.summary.info) || 0),
+            review: Math.max(0, Number(entry.summary.review) || 0),
+            findings: Math.max(0, Number(entry.summary.findings) || 0)
+          } : null,
+          findingsCount: Number.isInteger(entry.findingsCount) ? entry.findingsCount : 0,
+          reviewCount: Number.isInteger(entry.reviewCount) ? entry.reviewCount : 0,
+          scanMode: mode,
+          requestSummary: entry.requestSummary ? cleanRequestSummary(entry.requestSummary, mode) : null
+        };
+      }).slice(0, 12);
+      chrome.storage.local.set({ scanHistory: history });
     }
   });
 });
@@ -133,8 +207,9 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     const summary = VulnscanFindings.summarize(findings);
     chrome.storage.local.set({
       lastScan: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         scanId: message.scanId || null,
+        scanMode: ["passive", "safe", "lab"].includes(message.scanMode) ? message.scanMode : "passive",
         url: redactUrl(message.url),
         urlFingerprint: urlFingerprint(message.url),
         findings: findings,
@@ -180,6 +255,37 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 
+  if (message.type === "save_request_log") {
+    const requestLog = {
+      scanId: message.scanId || null,
+      entries: cleanRequestEntries(message.entries),
+      summary: message.summary && typeof message.summary === "object" ? cleanRequestSummary(message.summary, "passive") : null
+    };
+    chrome.storage.session.set({ [requestLogKey]: requestLog }, function () {
+      sendResponse({ ok: true, count: requestLog.entries.length });
+    });
+    return true;
+  }
+
+  if (message.type === "get_request_log") {
+    chrome.storage.session.get(requestLogKey, function (data) {
+      const requestLog = data[requestLogKey] || null;
+      const matches = requestLog && (!message.scanId || requestLog.scanId === message.scanId);
+      sendResponse(matches ? requestLog : { scanId: null, entries: [], summary: null });
+    });
+    return true;
+  }
+
+  if (message.type === "clear_request_log") {
+    chrome.storage.session.remove(requestLogKey, function () { sendResponse({ ok: true }); });
+    return true;
+  }
+
+  if (message.type === "clear_all_session") {
+    clearSessionData(function () { sendResponse({ ok: true }); });
+    return true;
+  }
+
   if (message.type === "scan_begin") {
     currentScan = {
       id: message.scanId || ("s" + Date.now()),
@@ -187,7 +293,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       origin: message.origin || null
     };
     redirectCache = {};
-    clearVault(function () {
+    clearSessionData(function () {
       sendResponse({ ok: true, scanId: currentScan.id });
     });
     return true;
@@ -250,4 +356,3 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 });
-

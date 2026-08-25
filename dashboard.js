@@ -16,6 +16,27 @@ const refreshTabsBtn = document.getElementById("refreshTabsBtn");
 const findingsCountEl = document.getElementById("findingsCount");
 const reviewCountEl = document.getElementById("reviewCount");
 const brandVersion = document.getElementById("brandVersion");
+const aboutVersion = document.getElementById("aboutVersion");
+const scanModeEl = document.getElementById("scanMode");
+const requestBudgetEl = document.getElementById("requestBudget");
+const modeHelp = document.getElementById("modeHelp");
+const cancelScanBtn = document.getElementById("cancelScanBtn");
+const requestLogEl = document.getElementById("requestLog");
+const requestSummaryEl = document.getElementById("requestSummary");
+const exportMenu = document.getElementById("exportMenu");
+const exportMarkdownBtn = document.getElementById("exportMarkdownBtn");
+const exportJsonBtn = document.getElementById("exportJsonBtn");
+const exportSecretsBtn = document.getElementById("exportSecretsBtn");
+const authorizationModal = document.getElementById("authorizationModal");
+const authorizationDetails = document.getElementById("authorizationDetails");
+const authorizationCheck = document.getElementById("authorizationCheck");
+const authorizationStart = document.getElementById("authorizationStart");
+const authorizationCancel = document.getElementById("authorizationCancel");
+const secretExportModal = document.getElementById("secretExportModal");
+const secretExportCheck = document.getElementById("secretExportCheck");
+const secretExportConfirm = document.getElementById("secretExportConfirm");
+const secretExportCancel = document.getElementById("secretExportCancel");
+const clearAllDataBtn = document.getElementById("clearAllDataBtn");
 
 let selectedTabId = null;
 let currentFindings = [];
@@ -28,10 +49,14 @@ let secretVaultUrl = "";
 let secretVaultScanId = null;
 let activeScanId = null;
 let knownTabs = [];
+let currentRequestController = null;
+let authorizationResolve = null;
+let scanCancelled = false;
 
 if (brandVersion) {
   brandVersion.textContent = "v" + chrome.runtime.getManifest().version;
 }
+if (aboutVersion) aboutVersion.textContent = "v" + chrome.runtime.getManifest().version;
 
 chrome.runtime.onMessage.addListener(function (message) {
   if (message && message.type === "export_secrets" && message.secrets) {
@@ -119,18 +144,95 @@ function storageGet(key) {
   });
 }
 
-function normalizeScan(scan) {
-  if (!scan || scan.schemaVersion !== 2 || !scan.url || !scan.urlFingerprint) return null;
-  const findings = VulnscanFindings.dedupe(scan.findings || []);
+function requestMode() {
+  return ["passive", "safe", "lab"].includes(scanModeEl.value) ? scanModeEl.value : "passive";
+}
+
+function requestBudget() {
+  const value = VulnscanRequests.clampBudget(requestBudgetEl.value);
+  requestBudgetEl.value = String(value);
+  return value;
+}
+
+function estimateRequests(mode) {
+  if (mode === "passive") return 0;
+  if (mode === "safe") return 13;
+  return 38;
+}
+
+function normalizeRequestSummary(summary, mode) {
+  const source = summary && typeof summary === "object" ? summary : {};
   return {
-    schemaVersion: 2,
+    mode: ["passive", "safe", "lab", "legacy"].includes(source.mode) ? source.mode : mode,
+    budget: Math.max(0, Math.min(50, Number(source.budget) || 0)),
+    attempted: Math.max(0, Number(source.attempted) || 0),
+    completed: Math.max(0, Number(source.completed) || 0),
+    stoppedReason: source.stoppedReason ? String(source.stoppedReason).slice(0, 100) : null
+  };
+}
+
+function updateModeHelp() {
+  const copy = {
+    passive: "No scanner-generated requests.",
+    safe: "Same-origin GET, HEAD, and OPTIONS checks.",
+    lab: "Safe checks plus controlled common-path discovery."
+  };
+  modeHelp.textContent = copy[requestMode()];
+}
+
+function renderRequestLog(entries, summary) {
+  const rows = entries || [];
+  if (!rows.length) {
+    requestLogEl.innerHTML = '<div class="empty-hint">No scanner-generated requests</div>';
+  } else {
+    requestLogEl.innerHTML = rows.map(function (entry) {
+      const duration = Number(entry.durationMs !== undefined ? entry.durationMs : entry.duration) || 0;
+      return '<div class="request-row"><span class="request-method">' + escapeHtml(entry.method) +
+        '</span><span class="request-url">' + escapeHtml(entry.url) +
+        '</span><span class="request-status">' + escapeHtml(entry.status || entry.outcome) +
+        '</span><span class="request-duration">' + duration + " ms</span></div>";
+    }).join("");
+  }
+  if (!summary || summary.mode === "passive") {
+    requestSummaryEl.textContent = "Passive mode — no requests";
+    return;
+  }
+  requestSummaryEl.textContent = summary.attempted + "/" + summary.budget + " requests" +
+    (summary.stoppedReason ? " — stopped: " + summary.stoppedReason : "");
+}
+
+function confirmActiveScan(origin, mode, budget) {
+  authorizationDetails.textContent = (mode === "lab" ? "Lab" : "Safe Active") + " mode will send up to " +
+    Math.min(budget, estimateRequests(mode)) + " same-origin requests to " + origin +
+    ". Allowed methods: GET, HEAD, OPTIONS" + (mode === "lab" ? ", POST. This patch does not use POST checks yet." : ".");
+  authorizationCheck.checked = false;
+  authorizationStart.disabled = true;
+  authorizationModal.hidden = false;
+  return new Promise(function (resolve) { authorizationResolve = resolve; });
+}
+
+function finishAuthorization(approved) {
+  authorizationModal.hidden = true;
+  const resolve = authorizationResolve;
+  authorizationResolve = null;
+  if (resolve) resolve(approved);
+}
+
+function normalizeScan(scan) {
+  if (!scan || (scan.schemaVersion !== 2 && scan.schemaVersion !== 3) || !scan.url || !scan.urlFingerprint) return null;
+  const findings = VulnscanFindings.dedupe(scan.findings || []);
+  const mode = ["passive", "safe", "lab"].includes(scan.scanMode) ? scan.scanMode : "legacy";
+  return {
+    schemaVersion: 3,
     scanId: scan.scanId || null,
+    scanMode: mode,
     url: scan.url,
     urlFingerprint: scan.urlFingerprint || null,
     timestamp: scan.timestamp || Date.now(),
     findings: findings,
     summary: VulnscanFindings.summarize(findings),
-    risk: VulnscanFindings.risk(findings)
+    risk: VulnscanFindings.risk(findings),
+    requestSummary: normalizeRequestSummary(scan.requestSummary, mode)
   };
 }
 
@@ -141,6 +243,7 @@ function clearResults() {
   secretVaultUrl = "";
   secretVaultScanId = null;
   chrome.runtime.sendMessage({ type: "clear_export_secrets" }, function () {});
+  chrome.runtime.sendMessage({ type: "clear_request_log" }, function () {});
   chrome.storage.local.remove("lastScan");
   resultsEl.innerHTML = '<div class="empty-hint">No findings yet</div>';
   headerResults.innerHTML = '<div class="empty-hint">Run a scan to analyze headers</div>';
@@ -148,6 +251,7 @@ function clearResults() {
   scoreEl.className = "stat-value score";
   findingsCountEl.textContent = "0";
   reviewCountEl.textContent = "0";
+  renderRequestLog([], null);
   ["sumHigh", "sumMed", "sumLow", "sumInfo"].forEach(function (id) {
     document.getElementById(id).textContent = "0";
   });
@@ -292,92 +396,110 @@ function activeFinding(options) {
   return VulnscanFindings.normalize(Object.assign({ source: "active" }, options));
 }
 
-async function runActiveChecks(pageUrl, scanId) {
+async function runActiveChecks(pageUrl, scanId, requestController, options) {
   const extra = [];
   const canary = "vxscan" + Date.now().toString(36);
   let parsed;
   try { parsed = new URL(pageUrl); } catch (e) { return extra; }
   const origin = parsed.origin;
+  const settings = options || {};
+  const controller = requestController || VulnscanRequests.create({
+    mode: settings.mode || "lab",
+    origin: origin,
+    budget: settings.budget || 50,
+    fetchFn: fetch
+  });
+  const mode = settings.mode || controller.mode;
 
-  const reflectParams = ["q", "search", "s", "id", "page", "name", "query", "keyword", "term"];
-  for (let i = 0; i < reflectParams.length; i++) {
+  const reflectParams = ["q", "search", "s", "query", "keyword", "term"];
+  for (let i = 0; i < reflectParams.length && controller.canRequest(); i++) {
     const param = reflectParams[i];
-    try {
-      const testUrl = new URL(pageUrl);
-      testUrl.searchParams.set(param, canary);
-      const response = await fetch(testUrl.toString(), { credentials: "omit", redirect: "manual" });
-      const body = await response.text();
-      if (body.indexOf(canary) !== -1) {
-        extra.push(activeFinding({
-          checkId: "active.reflection",
-          severity: "low",
-          confidence: "medium",
-          bucket: "review",
-          category: "xss",
-          type: "Reflected input",
-          detail: 'Parameter "' + param + '" was reflected in the response.',
-          evidence: "A unique harmless marker was returned verbatim in the response body.",
-          verification: "Locate the reflection context and confirm whether output encoding prevents HTML or script interpretation."
-        }));
-        break;
-      }
-    } catch (e) {}
+    const testUrl = new URL(pageUrl);
+    testUrl.searchParams.set(param, canary);
+    const response = await controller.request(testUrl.href, { method: "GET" });
+    if (response.body && response.body.indexOf(canary) !== -1) {
+      extra.push(activeFinding({
+        checkId: "active.reflection",
+        severity: "low",
+        confidence: "medium",
+        bucket: "review",
+        category: "xss",
+        type: "Reflected input",
+        detail: 'Parameter "' + param + '" was reflected in the response.',
+        evidence: "A unique harmless marker was returned verbatim in the response body.",
+        verification: "Locate the reflection context and confirm whether output encoding prevents HTML or script interpretation."
+      }));
+      break;
+    }
   }
 
-  const redirectParams = ["url", "redirect", "next", "return", "returnTo", "goto", "dest", "redirect_uri", "continue"];
-  const markerHost = "vxscan-redirect.example";
-  const destination = "https://" + markerHost + "/r/" + (scanId || canary);
+  const redirectParams = ["url", "redirect", "next", "return", "redirect_uri", "continue"];
+  const destination = "https://vxscan-redirect.example/r/" + (scanId || canary);
   const redirectProbes = [];
-  for (let i = 0; i < redirectParams.length; i++) {
+  for (let i = 0; i < redirectParams.length && controller.canRequest(); i++) {
     const param = redirectParams[i];
-    try {
-      const testUrl = new URL(pageUrl);
-      testUrl.searchParams.set(param, destination);
-      redirectProbes.push({ param: param, url: comparableUrl(testUrl.toString()) });
-      await fetch(testUrl.toString(), { credentials: "omit", redirect: "manual" });
-    } catch (e) {}
+    const testUrl = new URL(pageUrl);
+    testUrl.searchParams.set(param, destination);
+    redirectProbes.push({ param: param, url: comparableUrl(testUrl.href) });
+    await controller.request(testUrl.href, { method: "GET" });
   }
-  try {
-    const redirects = await new Promise(function (resolve) {
-      chrome.runtime.sendMessage({ type: "get_redirects", scanId: scanId }, function (response) {
-        resolve((response && response.redirects) || []);
-      });
+  const redirects = await new Promise(function (resolve) {
+    chrome.runtime.sendMessage({ type: "get_redirects", scanId: scanId }, function (response) {
+      resolve((response && response.redirects) || []);
     });
-    const expected = new URL(destination);
-    const match = redirects.find(function (entry) {
-      const probe = redirectProbes.find(function (item) {
-        return comparableUrl(entry.from) === item.url;
-      });
-      if (!probe || !entry.to) return false;
-      try {
-        const actual = new URL(entry.to);
-        if (actual.origin !== expected.origin || actual.pathname !== expected.pathname) return false;
-        entry.param = probe.param;
-        return true;
-      } catch (e) {
-        return false;
-      }
-    });
-    if (match) {
+  });
+  const expected = new URL(destination);
+  const match = redirects.find(function (entry) {
+    const probe = redirectProbes.find(function (item) { return comparableUrl(entry.from) === item.url; });
+    if (!probe || !entry.to) return false;
+    try {
+      const actual = new URL(entry.to);
+      if (actual.origin !== expected.origin || actual.pathname !== expected.pathname) return false;
+      entry.param = probe.param;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
+  if (match) {
+    extra.push(activeFinding({
+      checkId: "active.open-redirect",
+      severity: "high",
+      confidence: "high",
+      bucket: "finding",
+      category: "redirects",
+      type: "Open redirect confirmed",
+      detail: 'Parameter "' + match.param + '" redirected to the injected external destination.',
+      evidence: redactUrl(match.from) + " → " + redactUrl(match.to),
+      verification: "Repeat with another controlled HTTPS destination and confirm that no allowlist or interstitial blocks the redirect."
+    }));
+  }
+
+  if (controller.canRequest()) {
+    const robots = await controller.request(origin + "/robots.txt", { method: "GET" });
+    const sitemap = robots.ok && robots.body ? robots.body.match(/Sitemap:\s*(\S+)/i) : null;
+    if (sitemap) {
       extra.push(activeFinding({
-        checkId: "active.open-redirect",
-        severity: "high",
+        checkId: "active.sitemap",
+        severity: "info",
         confidence: "high",
-        bucket: "finding",
-        category: "redirects",
-        type: "Open redirect confirmed",
-        detail: 'Parameter "' + match.param + '" redirected to the injected external destination.',
-        evidence: redactUrl(match.from) + " → " + redactUrl(match.to),
-        verification: "Repeat with another controlled HTTPS destination and confirm that no allowlist or interstitial blocks the redirect."
+        bucket: "review",
+        category: "recon",
+        type: "Sitemap declared",
+        detail: redactUrl(sitemap[1]),
+        evidence: "robots.txt contains a Sitemap directive.",
+        verification: "Open the sitemap and review whether it exposes unexpected application routes."
       }));
     }
-  } catch (e) {}
+  }
+
+  if (mode !== "lab" || !controller.canRequest()) return VulnscanFindings.dedupe(extra);
 
   const commonPaths = [
     "/admin", "/admin/", "/login", "/wp-admin", "/wp-login.php", "/dashboard", "/panel",
-    "/.env", "/.git/HEAD", "/.git/config", "/robots.txt", "/sitemap.xml", "/phpinfo.php",
-    "/api", "/api/v1", "/graphql", "/swagger", "/actuator", "/actuator/health",
-    "/server-status", "/config", "/backup", "/debug", "/console", "/manager"
+    "/.env", "/.git/HEAD", "/.git/config", "/phpinfo.php", "/api", "/api/v1", "/graphql",
+    "/swagger", "/actuator", "/actuator/health", "/server-status", "/config", "/backup",
+    "/debug", "/console", "/manager", "/sitemap.xml"
   ];
 
   function normalizeBody(html) {
@@ -421,41 +543,28 @@ async function runActiveChecks(pageUrl, scanId) {
   let baselineBody = "";
   try {
     const missingPath = "/vxscan-not-a-real-path-" + Date.now();
-    const baseline = await fetch(origin + missingPath, { credentials: "omit", redirect: "manual" });
+    const baseline = await controller.request(origin + missingPath, { method: "GET" });
     baselineStatus = baseline.status;
-    baselineBody = normalizeBody(await baseline.text());
+    baselineBody = normalizeBody(baseline.body);
   } catch (e) {}
 
   const foundPaths = [];
   async function probe(path) {
-    const controller = new AbortController();
-    const timer = setTimeout(function () { controller.abort(); }, 2200);
-    try {
-      const response = await fetch(origin + path, {
-        method: "GET",
-        credentials: "omit",
-        redirect: "manual",
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-      if (!response.status || response.status === 0 || response.status === 404 || response.status === 410) return;
-      if (baselineStatus && response.status === baselineStatus) {
-        try {
-          const body = normalizeBody(await response.clone().text());
-          if (baselineBody && body === baselineBody) return;
-          if (baselineBody && body.length > 50 && bodySimilarity(body, baselineBody) >= 0.82) return;
-        } catch (e) {}
-        if (baselineStatus === 403 || baselineStatus === 404) return;
-      }
-      foundPaths.push(path + " (" + response.status + ")");
-    } catch (e) {
-      clearTimeout(timer);
+    if (!controller.canRequest()) return;
+    const response = await controller.request(origin + path, { method: "GET" });
+    if (!response.status || response.status === 404 || response.status === 410) return;
+    if (baselineStatus && response.status === baselineStatus) {
+      const body = normalizeBody(response.body);
+      if (baselineBody && body === baselineBody) return;
+      if (baselineBody && body.length > 50 && bodySimilarity(body, baselineBody) >= 0.82) return;
+      if (baselineStatus === 403 || baselineStatus === 404) return;
     }
+    foundPaths.push(path + " (" + response.status + ")");
   }
 
-  for (let i = 0; i < commonPaths.length; i += 5) {
-    await Promise.all(commonPaths.slice(i, i + 5).map(probe));
-    setProgress("path discovery " + Math.min(i + 5, commonPaths.length) + "/" + commonPaths.length);
+  for (let i = 0; i < commonPaths.length && controller.canRequest(); i++) {
+    await probe(commonPaths[i]);
+    setProgress("path discovery " + (i + 1) + "/" + commonPaths.length);
   }
   if (foundPaths.length) {
     extra.push(activeFinding({
@@ -471,27 +580,6 @@ async function runActiveChecks(pageUrl, scanId) {
       occurrences: foundPaths.length
     }));
   }
-
-  try {
-    const response = await fetch(origin + "/robots.txt", { credentials: "omit" });
-    if (response.ok) {
-      const text = await response.text();
-      const sitemap = text.match(/Sitemap:\s*(\S+)/i);
-      if (sitemap) {
-        extra.push(activeFinding({
-          checkId: "active.sitemap",
-          severity: "info",
-          confidence: "high",
-          bucket: "review",
-          category: "recon",
-          type: "Sitemap declared",
-          detail: redactUrl(sitemap[1]),
-          evidence: "robots.txt contains a Sitemap directive.",
-          verification: "Open the sitemap and review whether it exposes unexpected application routes."
-        }));
-      }
-    }
-  } catch (e) {}
 
   return VulnscanFindings.dedupe(extra);
 }
@@ -516,6 +604,9 @@ function renderFindings(data) {
   scoreEl.className = "stat-value score " +
     (scan.risk === "high" ? "bad" : scan.risk === "medium" || scan.risk === "review" ? "mid" : "good");
   applyFilter();
+  chrome.runtime.sendMessage({ type: "get_request_log", scanId: scan.scanId }, function (response) {
+    renderRequestLog((response && response.entries) || [], scan.requestSummary || (response && response.summary));
+  });
   return true;
 }
 
@@ -573,13 +664,15 @@ function saveToHistory(scan) {
   chrome.storage.local.get("scanHistory", function (data) {
     const history = data.scanHistory || [];
     history.unshift({
-      schemaVersion: 2,
+      schemaVersion: 3,
       url: scan.url,
       risk: scan.risk,
       timestamp: scan.timestamp,
       summary: scan.summary,
       findingsCount: scan.summary.findings,
-      reviewCount: scan.summary.review
+      reviewCount: scan.summary.review,
+      scanMode: scan.scanMode,
+      requestSummary: scan.requestSummary
     });
     chrome.storage.local.set({ scanHistory: history.slice(0, 12) });
   });
@@ -597,7 +690,7 @@ function loadHistory() {
       const reviewCount = Number.isInteger(entry.reviewCount) ? entry.reviewCount : 0;
       const risk = entry.risk || "legacy";
       return '<div class="hist-item"><div class="hist-url">' + escapeHtml(entry.url) + "</div>" +
-        '<div class="hist-meta">' + escapeHtml(risk) + " · " + findingCount + " findings · " + reviewCount +
+        '<div class="hist-meta">' + escapeHtml(entry.scanMode || "legacy") + " · " + escapeHtml(risk) + " · " + findingCount + " findings · " + reviewCount +
         " review · " + new Date(entry.timestamp).toLocaleString() + "</div></div>";
     }).join("");
   });
@@ -658,35 +751,11 @@ function getCapturedHeaders(tabId) {
   });
 }
 
-function reloadTabAndWait(tabId) {
-  return new Promise(function (resolve, reject) {
-    let settled = false;
-    const timer = setTimeout(function () {
-      finish(new Error("Timed out waiting for the target page to reload"));
-    }, 15000);
-    function finish(error, tab) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      if (error) reject(error);
-      else resolve(tab || null);
-    }
-    function onUpdated(updatedTabId, changeInfo, tab) {
-      if (updatedTabId === tabId && changeInfo.status === "complete") finish(null, tab);
-    }
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.tabs.reload(tabId, {}, function () {
-      if (chrome.runtime.lastError) finish(new Error(chrome.runtime.lastError.message));
-    });
-  });
-}
-
 async function waitForScanResult(scanId, pageUrl) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const stored = await storageGet("lastScan");
-    if (stored && stored.schemaVersion === 2 && stored.scanId === scanId && stored.urlFingerprint === urlFingerprint(pageUrl)) {
+    if (stored && stored.schemaVersion === 3 && stored.scanId === scanId && stored.urlFingerprint === urlFingerprint(pageUrl)) {
       return stored;
     }
     await new Promise(function (resolve) { setTimeout(resolve, 100); });
@@ -698,10 +767,15 @@ async function runScan() {
   if (scanning) return;
   scanning = true;
   scanBtn.disabled = true;
+  scanModeEl.disabled = true;
+  requestBudgetEl.disabled = true;
+  cancelScanBtn.hidden = false;
   secretVault = [];
   secretVaultUrl = "";
   secretVaultScanId = null;
   activeScanId = null;
+  currentRequestController = null;
+  scanCancelled = false;
   setStatus("// scanning...");
   setProgress("resolving selected tab...");
 
@@ -718,6 +792,9 @@ async function runScan() {
       return;
     }
 
+    const mode = requestMode();
+    const budget = requestBudget();
+    chrome.storage.local.set({ requestBudget: budget });
     const selectedOrigin = new URL(tab.url).origin;
     const originPattern = selectedOrigin + "/*";
     setProgress("requesting access to " + new URL(tab.url).hostname + "...");
@@ -742,21 +819,23 @@ async function runScan() {
       return;
     }
 
-    let capturedHeaders = await getCapturedHeaders(tab.id);
-    const headersAreCurrent = capturedHeaders.statusCode > 0 && comparableUrl(capturedHeaders.url) === comparableUrl(tab.url);
-    if (!headersAreCurrent) {
-      setProgress("reloading target once to capture response headers...");
-      const reloaded = await reloadTabAndWait(tab.id);
-      tab = reloaded || await getSelectedTab();
-      if (!tab || !tab.url) throw new Error("The target tab closed while reloading");
-      if (new URL(tab.url).origin !== selectedOrigin) {
-        await loadTabs();
-        setStatus("// target redirected to another site — scan again to grant access");
+    if (mode !== "passive") {
+      const approved = await confirmActiveScan(selectedOrigin, mode, budget);
+      if (!approved) {
+        setStatus("// active scan cancelled before any requests were sent");
         setProgress(null);
         return;
       }
-      capturedHeaders = await getCapturedHeaders(tab.id);
+      tab = await getSelectedTab();
+      if (!tab || !tab.url || new URL(tab.url).origin !== selectedOrigin) {
+        await loadTabs();
+        setStatus("// selected tab changed sites during confirmation — scan again");
+        setProgress(null);
+        return;
+      }
     }
+    const capturedHeaders = await getCapturedHeaders(tab.id);
+    const headersAreCurrent = capturedHeaders.statusCode > 0 && comparableUrl(capturedHeaders.url) === comparableUrl(tab.url);
 
     activeScanId = "s" + Date.now();
     await new Promise(function (resolve) {
@@ -764,17 +843,26 @@ async function runScan() {
         type: "scan_begin",
         scanId: activeScanId,
         tabId: tab.id,
-        origin: new URL(tab.url).origin
+        origin: new URL(tab.url).origin,
+        scanMode: mode
       }, function () { resolve(); });
     });
 
     showTarget(tab.url, tab.favIconUrl || "");
     setProgress("passive scan...");
-    const headerFindings = analyzeHeaders(capturedHeaders.headers || [], tab.url);
+    let headerFindings = [];
+    if (headersAreCurrent) {
+      headerFindings = analyzeHeaders(capturedHeaders.headers || [], tab.url);
+    } else {
+      headerResults.innerHTML = '<div class="empty-hint">Headers were not captured for this page load. Refresh the target tab, then scan again to include them.</div>';
+    }
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: function (scanId) { globalThis.__vulnscanScanId = scanId; },
-      args: [activeScanId]
+      func: function (scanId, scanMode) {
+        globalThis.__vulnscanScanId = scanId;
+        globalThis.__vulnscanScanMode = scanMode;
+      },
+      args: [activeScanId, mode]
     });
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -782,31 +870,54 @@ async function runScan() {
     });
 
     const passive = await waitForScanResult(activeScanId, tab.url);
-    setProgress("active probes + paths...");
     let activeFindings = [];
-    try {
-      activeFindings = await runActiveChecks(tab.url, activeScanId);
-    } catch (e) {}
+    let requestSummary = { mode: mode, budget: mode === "passive" ? 0 : budget, attempted: 0, completed: 0, stoppedReason: null };
+    let requestEntries = [];
+    if (scanCancelled) throw new Error("Scan cancelled");
+    if (mode !== "passive") {
+      setProgress(mode === "lab" ? "safe probes + controlled path discovery..." : "safe active probes...");
+      currentRequestController = VulnscanRequests.create({
+        mode: mode,
+        origin: selectedOrigin,
+        budget: budget,
+        fetchFn: fetch,
+        onLog: function (entry, entries, summary) { renderRequestLog(entries, summary); }
+      });
+      activeFindings = await runActiveChecks(tab.url, activeScanId, currentRequestController, { mode: mode, budget: budget });
+      requestEntries = currentRequestController.getLog();
+      requestSummary = currentRequestController.getSummary();
+    }
+    await new Promise(function (resolve) {
+      chrome.runtime.sendMessage({
+        type: "save_request_log",
+        scanId: activeScanId,
+        entries: requestEntries,
+        summary: requestSummary
+      }, function () { resolve(); });
+    });
 
     const findings = VulnscanFindings.dedupe((passive.findings || []).concat(headerFindings, activeFindings));
     const scan = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       scanId: activeScanId,
+      scanMode: mode,
       url: redactUrl(tab.url),
       urlFingerprint: urlFingerprint(tab.url),
       findings: findings,
       summary: VulnscanFindings.summarize(findings),
       risk: VulnscanFindings.risk(findings),
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      requestSummary: requestSummary
     };
     chrome.storage.local.set({ lastScan: scan });
     saveToHistory(scan);
     renderFindings(scan);
     setProgress(null);
-    setStatus("// scan complete — " + scan.summary.findings + " finding(s), " + scan.summary.review + " to review");
+    const stopped = requestSummary.stoppedReason ? " — requests stopped: " + requestSummary.stoppedReason : "";
+    setStatus("// scan complete — " + scan.summary.findings + " finding(s), " + scan.summary.review + " to review" + stopped);
   } catch (error) {
     setProgress(null);
-    setStatus("// error: " + error.message);
+    setStatus(error.message === "Scan cancelled" ? "// scan cancelled" : "// error: " + error.message);
   } finally {
     if (activeScanId) {
       chrome.runtime.sendMessage({ type: "scan_end", scanId: activeScanId }, function () {});
@@ -814,6 +925,10 @@ async function runScan() {
     }
     scanning = false;
     scanBtn.disabled = false;
+    scanModeEl.disabled = false;
+    requestBudgetEl.disabled = false;
+    cancelScanBtn.hidden = true;
+    currentRequestController = null;
   }
 }
 
@@ -851,23 +966,6 @@ function exportFinding(finding) {
   };
 }
 
-function secretExportFinding(value) {
-  return {
-    checkId: "secret.export",
-    fingerprint: VulnscanFindings.fingerprint({ checkId: "secret.export", bucket: "finding", type: "Secret value (export)", detail: value }),
-    severity: "high",
-    confidence: "high",
-    bucket: "finding",
-    category: "secrets",
-    type: "Secret value (export)",
-    detail: value,
-    evidence: "Full value requested through the explicit export action.",
-    verification: "Rotate or revoke the value if it is active and was not intended for client delivery.",
-    source: "export",
-    occurrences: 1
-  };
-}
-
 function downloadBlob(content, type, filename) {
   const url = URL.createObjectURL(new Blob([content], { type: type }));
   const link = document.createElement("a");
@@ -877,65 +975,96 @@ function downloadBlob(content, type, filename) {
   URL.revokeObjectURL(url);
 }
 
-exportBtn.addEventListener("click", function () {
+function buildMarkdownReport(scan) {
+  const findings = scan.findings.filter(function (finding) { return finding.bucket === "finding"; });
+  const review = scan.findings.filter(function (finding) { return finding.bucket === "review"; });
+  let markdown = "# VulnScan Report\n\n";
+  markdown += "**URL:** " + scan.url + "\n\n";
+  markdown += "**Mode:** " + scan.scanMode + "\n\n";
+  markdown += "**Risk:** " + scan.risk + "\n\n";
+  markdown += "**Time:** " + new Date(scan.timestamp).toISOString() + "\n\n";
+  markdown += "## Findings\n\n";
+  if (!findings.length) markdown += "No actionable findings.\n";
+  findings.forEach(function (finding) {
+    markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
+    markdown += "  - Confidence: " + finding.confidence + "\n";
+    markdown += "  - Evidence: " + finding.evidence + "\n";
+    markdown += "  - Verify: " + finding.verification + "\n";
+  });
+  markdown += "\n## Review\n\n";
+  if (!review.length) markdown += "No additional review items.\n";
+  review.forEach(function (finding) {
+    markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
+    markdown += "  - Confidence: " + finding.confidence + "\n";
+    markdown += "  - Evidence: " + finding.evidence + "\n";
+    markdown += "  - Verify: " + finding.verification + "\n";
+  });
+  markdown += "\n> Secret values are redacted. Use the separate full-secret export only when you need the raw values.\n";
+  return markdown;
+}
+
+function buildJsonReport(scan) {
+  return {
+    reportVersion: "3.0",
+    schemaVersion: 3,
+    url: scan.url,
+    scanId: scan.scanId,
+    scanMode: scan.scanMode,
+    timestamp: scan.timestamp,
+    risk: scan.risk,
+    summary: scan.summary,
+    requestSummary: scan.requestSummary,
+    secretsRedacted: true,
+    findings: scan.findings.map(exportFinding)
+  };
+}
+
+function exportRedactedMarkdown() {
   if (!lastScanData) {
     setStatus("// nothing to export");
     return;
   }
-  getExportSecrets(function (vault, available) {
-    const findings = lastScanData.findings.filter(function (finding) { return finding.bucket === "finding"; });
-    const review = lastScanData.findings.filter(function (finding) { return finding.bucket === "review"; });
-    let markdown = "# VulnScan Report\n\n";
-    markdown += "**URL:** " + lastScanData.url + "\n\n";
-    markdown += "**Risk:** " + lastScanData.risk + "\n\n";
-    markdown += "**Time:** " + new Date(lastScanData.timestamp).toISOString() + "\n\n";
-    markdown += "## Findings\n\n";
-    if (!findings.length) markdown += "No actionable findings.\n";
-    findings.forEach(function (finding) {
-      markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
-      markdown += "  - Confidence: " + finding.confidence + "\n";
-      markdown += "  - Evidence: " + finding.evidence + "\n";
-      markdown += "  - Verify: " + finding.verification + "\n";
-    });
-    markdown += "\n## Review\n\n";
-    if (!review.length) markdown += "No additional review items.\n";
-    review.forEach(function (finding) {
-      markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
-      markdown += "  - Confidence: " + finding.confidence + "\n";
-      markdown += "  - Evidence: " + finding.evidence + "\n";
-      markdown += "  - Verify: " + finding.verification + "\n";
-    });
-    if (vault.length) {
-      markdown += "\n## Exported Secret Values\n\n";
-      vault.forEach(function (secret) { markdown += "- " + secret + "\n"; });
-    } else if (!available && lastScanData.findings.some(function (finding) { return finding.category === "secrets"; })) {
-      markdown += "\n> Secret values are no longer available in this browser session. Run a fresh scan before exporting them.\n";
-      setStatus("// report exported — secret values were unavailable; scan again to include them");
-    }
-    downloadBlob(markdown, "text/markdown", "vuln-scan-" + Date.now() + ".md");
-  });
-});
+  downloadBlob(buildMarkdownReport(lastScanData), "text/markdown", "vuln-scan-" + Date.now() + ".md");
+  setStatus("// redacted Markdown report exported");
+}
 
-exportBtn.addEventListener("contextmenu", function (event) {
-  event.preventDefault();
-  if (!lastScanData) return;
+function exportRedactedJson() {
+  if (!lastScanData) {
+    setStatus("// nothing to export");
+    return;
+  }
+  downloadBlob(JSON.stringify(buildJsonReport(lastScanData), null, 2), "application/json", "vuln-scan-" + Date.now() + ".json");
+  setStatus("// redacted JSON report exported");
+}
+
+function exportRawSecrets() {
   getExportSecrets(function (vault, available) {
-    const reportFindings = lastScanData.findings.map(exportFinding).concat(vault.map(function (secret) {
-      return secretExportFinding(secret);
-    }));
-    const report = {
-      reportVersion: "2.0",
-      schemaVersion: 2,
-      url: lastScanData.url,
-      scanId: lastScanData.scanId,
-      timestamp: lastScanData.timestamp,
-      risk: lastScanData.risk,
-      summary: lastScanData.summary,
-      secretsAvailable: available,
-      findings: reportFindings
-    };
-    downloadBlob(JSON.stringify(report, null, 2), "application/json", "vuln-scan-" + Date.now() + ".json");
+    if (!available || !vault.length) {
+      setStatus("// raw values are unavailable — run a fresh scan with a matching target");
+      return;
+    }
+    let text = "VulnScan raw secret export\n";
+    text += "Target: " + lastScanData.url + "\n";
+    text += "Scan: " + lastScanData.scanId + "\n";
+    text += "Created: " + new Date().toISOString() + "\n\n";
+    text += vault.join("\n") + "\n";
+    downloadBlob(text, "text/plain", "vuln-scan-secrets-" + Date.now() + ".txt");
+    setStatus("// full secret values exported — handle the file securely");
   });
+}
+
+exportBtn.addEventListener("click", function () {
+  exportMenu.hidden = !exportMenu.hidden;
+  exportBtn.setAttribute("aria-expanded", String(!exportMenu.hidden));
+});
+exportMarkdownBtn.addEventListener("click", function () { exportMenu.hidden = true; exportRedactedMarkdown(); });
+exportJsonBtn.addEventListener("click", function () { exportMenu.hidden = true; exportRedactedJson(); });
+exportSecretsBtn.addEventListener("click", function () {
+  exportMenu.hidden = true;
+  if (!lastScanData) { setStatus("// nothing to export"); return; }
+  secretExportCheck.checked = false;
+  secretExportConfirm.disabled = true;
+  secretExportModal.hidden = false;
 });
 
 document.querySelectorAll(".nav-btn").forEach(function (button) {
@@ -970,6 +1099,46 @@ document.querySelectorAll(".filter").forEach(function (button) {
 
 scanBtn.addEventListener("click", runScan);
 clearBtn.addEventListener("click", clearResults);
+cancelScanBtn.addEventListener("click", function () {
+  scanCancelled = true;
+  if (currentRequestController) currentRequestController.cancel();
+  setStatus("// cancelling scan...");
+});
+
+scanModeEl.addEventListener("change", updateModeHelp);
+requestBudgetEl.addEventListener("change", function () {
+  chrome.storage.local.set({ requestBudget: requestBudget() });
+});
+
+authorizationCheck.addEventListener("change", function () {
+  authorizationStart.disabled = !authorizationCheck.checked;
+});
+authorizationStart.addEventListener("click", function () {
+  if (authorizationCheck.checked) finishAuthorization(true);
+});
+authorizationCancel.addEventListener("click", function () { finishAuthorization(false); });
+
+secretExportCheck.addEventListener("change", function () {
+  secretExportConfirm.disabled = !secretExportCheck.checked;
+});
+secretExportConfirm.addEventListener("click", function () {
+  if (!secretExportCheck.checked) return;
+  secretExportModal.hidden = true;
+  exportRawSecrets();
+});
+secretExportCancel.addEventListener("click", function () { secretExportModal.hidden = true; });
+
+if (clearAllDataBtn) {
+  clearAllDataBtn.addEventListener("click", function () {
+    chrome.storage.local.remove(["lastScan", "scanHistory", "requestBudget"], function () {
+      chrome.runtime.sendMessage({ type: "clear_all_session" }, function () {
+        clearResults();
+        historyList.innerHTML = '<div class="empty-hint">No history yet</div>';
+        setStatus("// all saved scan data cleared");
+      });
+    });
+  });
+}
 
 if (deleteHistoryBtn) {
   deleteHistoryBtn.addEventListener("click", function () {
@@ -992,14 +1161,14 @@ document.addEventListener("keydown", function (event) {
   const key = event.key.toLowerCase();
   if (key === "s") { event.preventDefault(); runScan(); }
   if (key === "c") { event.preventDefault(); clearResults(); }
-  if (key === "e") { event.preventDefault(); exportBtn.click(); }
+  if (key === "e") { event.preventDefault(); exportRedactedMarkdown(); }
 });
 
 chrome.storage.local.get("lastScan", function (data) {
   if (!data.lastScan) return;
   if (!renderFindings(data.lastScan)) {
     chrome.storage.local.remove("lastScan", function () {
-      setStatus("// v5.2 needs a fresh scan — previous cached results were cleared");
+      setStatus("// v5.3 needs a fresh scan — incompatible cached results were cleared");
     });
   }
 });
@@ -1016,5 +1185,8 @@ refreshTabsBtn.addEventListener("click", function () {
   loadTabs().then(function () { setStatus("// tab list refreshed"); });
 });
 
+chrome.storage.local.get("requestBudget", function (data) {
+  if (data.requestBudget) requestBudgetEl.value = String(VulnscanRequests.clampBudget(data.requestBudget));
+});
+updateModeHelp();
 loadTabs();
-
