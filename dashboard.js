@@ -19,6 +19,15 @@ let currentFindings = [];
 let currentFilter = "all";
 let lastScanData = null;
 let scanning = false;
+let secretVault = []; // memory only — never written to chrome.storage
+let activeScanId = null;
+let knownTabs = [];
+
+chrome.runtime.onMessage.addListener(function (msg) {
+  if (msg && msg.type === "export_secrets" && msg.secrets) {
+    secretVault = msg.secrets.slice();
+  }
+});
 
 function escapeHtml(str) {
   return String(str)
@@ -63,6 +72,9 @@ function showTarget(url, favIconUrl) {
 function clearResults() {
   lastScanData = null;
   currentFindings = [];
+  secretVault = [];
+  chrome.runtime.sendMessage({ type: "clear_export_secrets" }, function () {});
+  chrome.storage.local.remove("lastScan");
   resultsEl.innerHTML = '<div class="empty-hint">No findings yet</div>';
   headerResults.innerHTML = '<div class="empty-hint">Run a scan to analyze headers</div>';
   scoreEl.textContent = "—";
@@ -165,14 +177,14 @@ function analyzeHeaders(headerList) {
   headerResults.innerHTML = html || '<div class="empty-hint">No headers captured</div>';
 }
 
-async function runActiveChecks(pageUrl) {
+async function runActiveChecks(pageUrl, scanId) {
   const extra = [];
   const canary = "vxscan" + Date.now().toString(36);
   let u;
   try { u = new URL(pageUrl); } catch (e) { return extra; }
   const origin = u.origin;
 
-  // reflected params (still useful as a clue)
+  // reflected input
   const reflectParams = ["q", "search", "s", "id", "page", "name", "query", "keyword", "term"];
   for (let i = 0; i < reflectParams.length; i++) {
     const param = reflectParams[i];
@@ -185,14 +197,52 @@ async function runActiveChecks(pageUrl) {
         extra.push({
           severity: "medium",
           type: "Reflected input",
-          detail: 'Parameter "' + param + '" reflects in response (reflects in page, check manually)'
+          detail: 'Parameter "' + param + '" reflects in page, check manually'
         });
         break;
       }
     } catch (e) {}
   }
 
-  // soft-404 baseline then path probes
+  // open redirect: inject external destination, then check redirect cache
+  const redirectParams = ["url", "redirect", "next", "return", "returnTo", "goto", "dest", "redirect_uri", "continue"];
+  const markerHost = "vxscan-redirect.example";
+  const dest = "https://" + markerHost + "/r/" + (scanId || canary);
+  for (let i = 0; i < redirectParams.length; i++) {
+    const param = redirectParams[i];
+    try {
+      const testUrl = new URL(pageUrl);
+      testUrl.searchParams.set(param, dest);
+      await fetch(testUrl.toString(), { credentials: "omit", redirect: "manual" });
+    } catch (e) {}
+  }
+  try {
+    const redir = await new Promise(function (resolve) {
+      chrome.runtime.sendMessage({ type: "get_redirects", scanId: scanId }, function (resp) {
+        resolve((resp && resp.redirects) || []);
+      });
+    });
+    const expectedDestination = new URL(dest);
+    const hit = redir.find(function (e) {
+      if (!e.to) return false;
+      try {
+        const actualDestination = new URL(e.to);
+        return actualDestination.origin === expectedDestination.origin &&
+          actualDestination.pathname === expectedDestination.pathname;
+      } catch (err) {
+        return false;
+      }
+    });
+    if (hit) {
+      extra.push({
+        severity: "high",
+        type: "Open redirect confirmed",
+        detail: hit.from + " → " + hit.to
+      });
+    }
+  } catch (e) {}
+
+  // soft-404 baseline
   const commonPaths = [
     "/admin", "/admin/", "/login", "/wp-admin", "/wp-login.php", "/dashboard", "/panel",
     "/.env", "/.git/HEAD", "/.git/config", "/robots.txt", "/sitemap.xml", "/phpinfo.php",
@@ -200,14 +250,22 @@ async function runActiveChecks(pageUrl) {
     "/server-status", "/config", "/backup", "/debug", "/console", "/manager"
   ];
 
+  function norm(html) {
+    return String(html || "")
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 4000);
+  }
+
   let baselineStatus = null;
-  let baselineLen = -1;
+  let baselineNorm = "";
   try {
     const randPath = "/vxscan-not-a-real-path-" + Date.now();
     const baseResp = await fetch(origin + randPath, { credentials: "omit", redirect: "manual" });
     baselineStatus = baseResp.status;
-    const baseText = await baseResp.text();
-    baselineLen = baseText.length;
+    baselineNorm = norm(await baseResp.text());
   } catch (e) {}
 
   const foundPaths = [];
@@ -224,18 +282,21 @@ async function runActiveChecks(pageUrl) {
       });
       clearTimeout(t);
       if (!resp.status || resp.status === 0) return;
-      // skip soft-404: same status as random path (and similar size when 200)
-      if (baselineStatus && resp.status === baselineStatus) {
-        if (resp.status === 200 || resp.status === 403 || resp.status === 404) {
-          try {
-            const body = await resp.clone().text();
-            if (baselineLen >= 0 && Math.abs(body.length - baselineLen) < 80) return;
-          } catch (e) {}
-          // if baseline was 403/404 and probe matches, treat as non-existent
-          if (baselineStatus === 403 || baselineStatus === 404) return;
-        }
-      }
       if (resp.status === 404 || resp.status === 410) return;
+      if (baselineStatus && resp.status === baselineStatus) {
+        try {
+          const body = norm(await resp.clone().text());
+          if (baselineNorm && body === baselineNorm) return;
+          if (baselineNorm && body.length > 50) {
+            // crude similarity: shared prefix ratio
+            const n = Math.min(body.length, baselineNorm.length, 200);
+            let same = 0;
+            for (let i = 0; i < n; i++) if (body[i] === baselineNorm[i]) same++;
+            if (same / n > 0.92) return;
+          }
+        } catch (e) {}
+        if (baselineStatus === 403 || baselineStatus === 404) return;
+      }
       foundPaths.push(path + " (" + resp.status + ")");
     } catch (e) {
       clearTimeout(t);
@@ -243,8 +304,7 @@ async function runActiveChecks(pageUrl) {
   }
 
   for (let i = 0; i < commonPaths.length; i += 5) {
-    const batch = commonPaths.slice(i, i + 5);
-    await Promise.all(batch.map(probe));
+    await Promise.all(commonPaths.slice(i, i + 5).map(probe));
     setProgress("path discovery " + Math.min(i + 5, commonPaths.length) + "/" + commonPaths.length);
   }
 
@@ -256,7 +316,6 @@ async function runActiveChecks(pageUrl) {
     });
   }
 
-  // robots / sitemap
   try {
     const robotsResp = await fetch(origin + "/robots.txt", { credentials: "omit" });
     if (robotsResp.ok) {
@@ -265,28 +324,6 @@ async function runActiveChecks(pageUrl) {
       if (sitemapMatch) {
         extra.push({ severity: "info", type: "Sitemap declared", detail: sitemapMatch[1] });
       }
-    }
-  } catch (e) {}
-
-  // open-redirect: check webRequest redirect cache for cross-host redirects from probe URLs
-  try {
-    const redir = await new Promise(function (resolve) {
-      chrome.runtime.sendMessage({ type: "get_redirects" }, function (resp) {
-        resolve((resp && resp.redirects) || {});
-      });
-    });
-    const hits = [];
-    Object.keys(redir).forEach(function (fromUrl) {
-      if (fromUrl.indexOf(origin) === 0) {
-        hits.push(fromUrl + " → " + redir[fromUrl].to);
-      }
-    });
-    if (hits.length) {
-      extra.push({
-        severity: "medium",
-        type: "Cross-origin redirect",
-        detail: hits.slice(0, 5).join(" | ")
-      });
     }
   } catch (e) {}
 
@@ -332,7 +369,7 @@ function applyFilter() {
   }
   const order = { high: 0, medium: 1, low: 2, info: 3 };
   list = list.slice().sort(function (a, b) {
-    return (order[a.severity] || 9) - (order[b.severity] || 9);
+    return (order[a.severity] ?? 9) - (order[b.severity] ?? 9);
   });
 
   resultsEl.innerHTML = list.map(function (f, idx) {
@@ -405,6 +442,7 @@ function loadTabs() {
   return new Promise(function (resolve) {
     chrome.runtime.sendMessage({ type: "list_tabs" }, function (resp) {
       const tabs = (resp && resp.tabs) || [];
+      knownTabs = tabs;
       if (!tabSelect) { resolve(tabs); return; }
 
       if (!tabs.length) {
@@ -437,10 +475,19 @@ function loadTabs() {
   });
 }
 
+function getCachedSelectedTab() {
+  const id = selectedTabId !== null
+    ? selectedTabId
+    : (tabSelect && tabSelect.value ? parseInt(tabSelect.value, 10) : null);
+  if (id === null || Number.isNaN(id)) return null;
+  return knownTabs.find(function (tab) { return tab.id === id; }) || null;
+}
+
 function getSelectedTab() {
   return new Promise(function (resolve) {
-    const id = selectedTabId || (tabSelect && tabSelect.value ? parseInt(tabSelect.value, 10) : null);
-    if (!id) {
+    const cached = getCachedSelectedTab();
+    const id = cached ? cached.id : null;
+    if (id === null) {
       resolve(null);
       return;
     }
@@ -450,10 +497,51 @@ function getSelectedTab() {
   });
 }
 
-async function getTargetTab() {
+function getCapturedHeaders(tabId) {
   return new Promise(function (resolve) {
-    chrome.runtime.sendMessage({ type: "get_active_tab" }, function (resp) {
-      resolve((resp && resp.tab) || null);
+    chrome.runtime.sendMessage({ type: "get_headers", tabId: tabId }, function (resp) {
+      resolve(resp || { headers: [], url: "", statusCode: 0 });
+    });
+  });
+}
+
+function comparableUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.href;
+  } catch (e) {
+    return "";
+  }
+}
+
+function reloadTabAndWait(tabId) {
+  return new Promise(function (resolve, reject) {
+    let settled = false;
+    const timer = setTimeout(function () {
+      finish(new Error("Timed out waiting for the target page to reload"));
+    }, 15000);
+
+    function finish(error, tab) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      if (error) reject(error);
+      else resolve(tab || null);
+    }
+
+    function onUpdated(updatedTabId, changeInfo, tab) {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        finish(null, tab);
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.reload(tabId, {}, function () {
+      if (chrome.runtime.lastError) {
+        finish(new Error(chrome.runtime.lastError.message));
+      }
     });
   });
 }
@@ -462,35 +550,81 @@ async function runScan() {
   if (scanning) return;
   scanning = true;
   scanBtn.disabled = true;
+  secretVault = [];
+  activeScanId = null;
   setStatus("// scanning...");
-  setProgress("resolving active tab...");
+  setProgress("resolving selected tab...");
 
   try {
-    // refresh list then use selection
-    await loadTabs();
-    const tab = await getSelectedTab();
-    if (!tab || !tab.id || !tab.url) {
+    // keep the permission request inside the click handler
+    let tab = getCachedSelectedTab();
+    if (!tab || !Number.isInteger(tab.id) || !tab.url) {
       setStatus("// no scannable tab selected — open a website and refresh the list");
       setProgress(null);
-      scanning = false;
-      scanBtn.disabled = false;
       return;
     }
     if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://") || tab.url.startsWith("edge://")) {
       setStatus("// cannot scan browser internal pages");
       setProgress(null);
-      scanning = false;
-      scanBtn.disabled = false;
       return;
     }
 
-    showTarget(tab.url);
-    setProgress("passive scan...");
+    const selectedOrigin = new URL(tab.url).origin;
+    const originPattern = selectedOrigin + "/*";
+    setProgress("requesting access to " + new URL(tab.url).hostname + "...");
+    let granted = false;
+    try {
+      granted = await chrome.permissions.request({ origins: [originPattern] });
+    } catch (e) {
+      throw new Error("Could not request site permission: " + e.message);
+    }
+    if (!granted) {
+      setStatus("// permission denied for this site");
+      setProgress(null);
+      return;
+    }
 
-    // headers
-    chrome.runtime.sendMessage({ type: "get_headers", tabId: tab.id }, function (resp) {
-      if (resp && resp.headers) analyzeHeaders(resp.headers);
+    tab = await getSelectedTab();
+    if (!tab || !Number.isInteger(tab.id) || !tab.url) {
+      throw new Error("The selected tab is no longer available");
+    }
+    if (new URL(tab.url).origin !== selectedOrigin) {
+      await loadTabs();
+      setStatus("// selected tab changed sites — scan again to grant access");
+      setProgress(null);
+      return;
+    }
+
+    let capturedHeaders = await getCapturedHeaders(tab.id);
+    const headersAreCurrent = capturedHeaders.statusCode > 0 &&
+      comparableUrl(capturedHeaders.url) === comparableUrl(tab.url);
+    if (!headersAreCurrent) {
+      setProgress("reloading target once to capture response headers...");
+      const reloadedTab = await reloadTabAndWait(tab.id);
+      tab = reloadedTab || await getSelectedTab();
+      if (!tab || !tab.url) throw new Error("The target tab closed while reloading");
+      if (new URL(tab.url).origin !== selectedOrigin) {
+        await loadTabs();
+        setStatus("// target redirected to another site — scan again to grant access");
+        setProgress(null);
+        return;
+      }
+      capturedHeaders = await getCapturedHeaders(tab.id);
+    }
+
+    activeScanId = "s" + Date.now();
+    await new Promise(function (resolve) {
+      chrome.runtime.sendMessage({
+        type: "scan_begin",
+        scanId: activeScanId,
+        tabId: tab.id,
+        origin: new URL(tab.url).origin
+      }, function () { resolve(); });
     });
+
+    showTarget(tab.url, tab.favIconUrl || "");
+    setProgress("passive scan...");
+    analyzeHeaders(capturedHeaders.headers || []);
 
     // inject content script
     await chrome.scripting.executeScript({
@@ -508,7 +642,6 @@ async function runScan() {
     let scan = stored && stored.url === tab.url ? stored : {
       url: tab.url,
       findings: [],
-      score: 100,
       summary: { high: 0, medium: 0, low: 0, info: 0 },
       timestamp: Date.now()
     };
@@ -516,7 +649,7 @@ async function runScan() {
     setProgress("active probes + paths...");
     let activeFindings = [];
     try {
-      activeFindings = await runActiveChecks(tab.url);
+      activeFindings = await runActiveChecks(tab.url, activeScanId);
     } catch (e) {
       console.log(e);
     }
@@ -542,10 +675,14 @@ async function runScan() {
   } catch (err) {
     setProgress(null);
     setStatus("// error: " + err.message);
+  } finally {
+    if (activeScanId) {
+      chrome.runtime.sendMessage({ type: "scan_end", scanId: activeScanId }, function () {});
+      activeScanId = null;
+    }
+    scanning = false;
+    scanBtn.disabled = false;
   }
-
-  scanning = false;
-  scanBtn.disabled = false;
 }
 
 // nav
@@ -573,50 +710,66 @@ document.querySelectorAll(".filter").forEach(function (btn) {
 scanBtn.addEventListener("click", runScan);
 clearBtn.addEventListener("click", clearResults);
 
+function getExportSecrets(callback) {
+  chrome.runtime.sendMessage({ type: "get_export_secrets" }, function (resp) {
+    const combined = secretVault.concat((resp && resp.secrets) || []);
+    callback(Array.from(new Set(combined)));
+  });
+}
+
 exportBtn.addEventListener("click", function () {
   if (!lastScanData) {
     setStatus("// nothing to export");
     return;
   }
-  const findings = (lastScanData.findings || []).map(function (f) {
-    return { severity: f.severity, type: f.type, detail: f.exportDetail || f.detail };
+  getExportSecrets(function (vault) {
+    const findings = (lastScanData.findings || []).map(function (f) {
+      return { severity: f.severity, type: f.type, detail: f.detail };
+    });
+    vault.forEach(function (s) {
+      findings.push({ severity: "high", type: "Possible secret (export)", detail: s });
+    });
+    let md = "# VulnScan Report\n\n";
+    md += "**URL:** " + lastScanData.url + "\n\n";
+    md += "**Risk:** " + (lastScanData.risk || "n/a") + "\n\n";
+    md += "**Time:** " + new Date(lastScanData.timestamp || Date.now()).toISOString() + "\n\n";
+    md += "## Findings\n\n";
+    findings.forEach(function (f) {
+      md += "- **[" + f.severity.toUpperCase() + "]** " + f.type + " — " + f.detail + "\n";
+    });
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "vuln-scan-" + Date.now() + ".md";
+    a.click();
+    URL.revokeObjectURL(url);
   });
-  let md = "# VulnScan Report\n\n";
-  md += "**URL:** " + lastScanData.url + "\n\n";
-  md += "**Risk:** " + (lastScanData.risk || "n/a") + "\n\n";
-  md += "**Time:** " + new Date(lastScanData.timestamp || Date.now()).toISOString() + "\n\n";
-  md += "## Findings\n\n";
-  findings.forEach(function (f) {
-    md += "- **[" + f.severity.toUpperCase() + "]** " + f.type + " — " + f.detail + "\n";
-  });
-  const blob = new Blob([md], { type: "text/markdown" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "vuln-scan-" + Date.now() + ".md";
-  a.click();
-  URL.revokeObjectURL(url);
 });
 
 exportBtn.addEventListener("contextmenu", function (e) {
   e.preventDefault();
   if (!lastScanData) return;
-  const exportData = {
-    url: lastScanData.url,
-    timestamp: lastScanData.timestamp,
-    score: lastScanData.score,
-    summary: lastScanData.summary,
-    findings: (lastScanData.findings || []).map(function (f) {
-      return { severity: f.severity, type: f.type, detail: f.exportDetail || f.detail };
-    })
-  };
-  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "vuln-scan-" + Date.now() + ".json";
-  a.click();
-  URL.revokeObjectURL(url);
+  getExportSecrets(function (vault) {
+    const exportData = {
+      url: lastScanData.url,
+      timestamp: lastScanData.timestamp,
+      risk: lastScanData.risk,
+      summary: lastScanData.summary,
+      findings: (lastScanData.findings || []).map(function (f) {
+        return { severity: f.severity, type: f.type, detail: f.detail };
+      }).concat(vault.map(function (s) {
+        return { severity: "high", type: "Possible secret (export)", detail: s };
+      }))
+    };
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "vuln-scan-" + Date.now() + ".json";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
 });
 
 if (deleteHistoryBtn) {
@@ -652,9 +805,8 @@ chrome.storage.local.get("lastScan", function (data) {
 
 if (tabSelect) {
   tabSelect.addEventListener("change", function () {
-    selectedTabId = parseInt(tabSelect.value, 10) || null;
-    const opt = tabSelect.options[tabSelect.selectedIndex];
-    // fetch full tab for favicon/url
+    const parsedTabId = parseInt(tabSelect.value, 10);
+    selectedTabId = Number.isNaN(parsedTabId) ? null : parsedTabId;
     getSelectedTab().then(function (tab) {
       if (tab) {
         showTarget(tab.url, tab.favIconUrl || "");

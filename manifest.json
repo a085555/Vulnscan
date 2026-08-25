@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Vuln Scanner Ultimate",
-  "version": "5.0",
-  "description": "Full-page passive + light active website vulnerability scanner",
+  "version": "5.1.0",
+  "description": "Passive + light-active webpage security checks. Tool by a085.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -10,8 +10,9 @@
     "webRequest",
     "tabs"
   ],
-  "host_permissions": [
-    "<all_urls>"
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"

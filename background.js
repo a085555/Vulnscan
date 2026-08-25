@@ -1,5 +1,7 @@
 const headerCache = {};
-const redirectCache = {};
+let redirectCache = {};
+let currentScan = null;
+let secretVaultMemory = [];
 
 chrome.webRequest.onHeadersReceived.addListener(
   function (details) {
@@ -17,17 +19,20 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.webRequest.onBeforeRedirect.addListener(
   function (details) {
-    if (!details.url) return;
+    if (!currentScan || !details.url || !details.redirectUrl) return;
     try {
       const from = new URL(details.url);
-      const to = new URL(details.redirectUrl);
-      if (from.hostname !== to.hostname) {
-        redirectCache[details.url] = {
-          to: details.redirectUrl,
-          status: details.statusCode,
-          tabId: details.tabId
-        };
-      }
+      if (currentScan.origin && from.origin !== currentScan.origin) return;
+      const entry = {
+        from: details.url,
+        to: details.redirectUrl,
+        status: details.statusCode,
+        tabId: details.tabId,
+        scanId: currentScan ? currentScan.id : null,
+        ts: Date.now()
+      };
+      const key = details.url + "->" + details.redirectUrl;
+      redirectCache[key] = entry;
     } catch (e) {}
   },
   { urls: ["<all_urls>"] }
@@ -46,16 +51,13 @@ chrome.action.onClicked.addListener(async function () {
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === "scan_results") {
-    // never persist raw secrets — redact any full fields
+    // never write raw secrets to storage
     const findings = (message.findings || []).map(function (f) {
-      const copy = {
+      return {
         severity: f.severity,
         type: f.type,
         detail: f.detail
       };
-      // exportDetail kept for export only — UI uses detail
-      if (f.exportDetail) copy.exportDetail = f.exportDetail;
-      return copy;
     });
     chrome.storage.local.set({
       lastScan: {
@@ -69,33 +71,57 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return;
   }
 
+  if (message.type === "export_secrets") {
+    secretVaultMemory = (message.secrets || []).slice();
+    return;
+  }
+
+  if (message.type === "get_export_secrets") {
+    sendResponse({ secrets: secretVaultMemory.slice() });
+    return true;
+  }
+
+  if (message.type === "clear_export_secrets") {
+    secretVaultMemory = [];
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "scan_begin") {
+    secretVaultMemory = [];
+    currentScan = {
+      id: message.scanId || ("s" + Date.now()),
+      tabId: Number.isInteger(message.tabId) ? message.tabId : null,
+      origin: message.origin || null
+    };
+    // drop old redirects
+    redirectCache = {};
+    sendResponse({ ok: true, scanId: currentScan.id });
+    return true;
+  }
+
+  if (message.type === "scan_end") {
+    if (!message.scanId || (currentScan && currentScan.id === message.scanId)) {
+      currentScan = null;
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
   if (message.type === "get_headers") {
-    const data = headerCache[message.tabId] || { headers: [], url: "", statusCode: 0 };
-    sendResponse(data);
+    sendResponse(headerCache[message.tabId] || { headers: [], url: "", statusCode: 0 });
     return true;
   }
 
   if (message.type === "get_redirects") {
-    sendResponse({ redirects: redirectCache });
-    return true;
-  }
-
-  if (message.type === "get_active_tab") {
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
-      let tab = (tabs || []).find(function (t) {
-        return t.url && !t.url.startsWith("chrome://") && !t.url.startsWith("chrome-extension://") && !t.url.startsWith("edge://");
-      });
-      if (!tab) {
-        chrome.tabs.query({}, function (all) {
-          tab = (all || []).find(function (t) {
-            return t.url && !t.url.startsWith("chrome://") && !t.url.startsWith("chrome-extension://") && !t.url.startsWith("edge://");
-          });
-          sendResponse({ tab: tab || null });
-        });
-        return;
-      }
-      sendResponse({ tab: tab || null });
+    const scanId = message.scanId;
+    const out = [];
+    Object.keys(redirectCache).forEach(function (k) {
+      const e = redirectCache[k];
+      if (scanId && e.scanId !== scanId) return;
+      out.push(e);
     });
+    sendResponse({ redirects: out });
     return true;
   }
 
@@ -130,6 +156,16 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         sendResponse({ tab: null, error: chrome.runtime.lastError.message });
         return;
       }
+      sendResponse({ tab: tab || null });
+    });
+    return true;
+  }
+
+  if (message.type === "get_active_tab") {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
+      let tab = (tabs || []).find(function (t) {
+        return t.url && !t.url.startsWith("chrome://") && !t.url.startsWith("chrome-extension://");
+      });
       sendResponse({ tab: tab || null });
     });
     return true;
