@@ -42,11 +42,19 @@ function setStatus(msg) {
   statusBar.textContent = msg;
 }
 
-function showTarget(url) {
+function showTarget(url, favIconUrl) {
   try {
     const u = new URL(url);
     targetHost.textContent = u.hostname + (u.pathname !== "/" ? u.pathname.slice(0, 60) : "");
-    targetFav.src = "https://www.google.com/s2/favicons?domain=" + encodeURIComponent(u.hostname) + "&sz=64";
+    if (favIconUrl) {
+      targetFav.src = favIconUrl;
+      targetFav.style.display = "block";
+    } else if (targetFav.src && targetFav.src.indexOf("chrome-extension") === -1 && targetFav.src.indexOf("google.com/s2") === -1) {
+      // keep existing non-google icon if any
+    } else {
+      targetFav.removeAttribute("src");
+      targetFav.style.display = "none";
+    }
   } catch (e) {
     targetHost.textContent = url || "No tab selected";
   }
@@ -57,7 +65,7 @@ function clearResults() {
   currentFindings = [];
   resultsEl.innerHTML = '<div class="empty-hint">No findings yet</div>';
   headerResults.innerHTML = '<div class="empty-hint">Run a scan to analyze headers</div>';
-  scoreEl.textContent = "--";
+  scoreEl.textContent = "—";
   scoreEl.className = "stat-value score";
   ["sumHigh", "sumMed", "sumLow", "sumInfo"].forEach(function (id) {
     document.getElementById(id).textContent = "0";
@@ -162,8 +170,9 @@ async function runActiveChecks(pageUrl) {
   const canary = "vxscan" + Date.now().toString(36);
   let u;
   try { u = new URL(pageUrl); } catch (e) { return extra; }
+  const origin = u.origin;
 
-  // reflected params
+  // reflected params (still useful as a clue)
   const reflectParams = ["q", "search", "s", "id", "page", "name", "query", "keyword", "term"];
   for (let i = 0; i < reflectParams.length; i++) {
     const param = reflectParams[i];
@@ -171,69 +180,36 @@ async function runActiveChecks(pageUrl) {
       const testUrl = new URL(pageUrl);
       testUrl.searchParams.set(param, canary);
       const resp = await fetch(testUrl.toString(), { credentials: "omit", redirect: "manual" });
-      const text = await resp.text();
-      if (text.indexOf(canary) !== -1) {
+      const textBody = await resp.text();
+      if (textBody.indexOf(canary) !== -1) {
         extra.push({
           severity: "medium",
           type: "Reflected input",
-          detail: 'Parameter "' + param + '" reflects value in response (possible XSS vector)'
-        });
-        extra.push({
-          severity: "info",
-          type: "Suggested XSS payloads (manual)",
-          detail: 'script-alert | img-onerror | svg-onload | onmouseover (test manually)'
+          detail: 'Parameter "' + param + '" reflects in response (reflects in page, check manually)'
         });
         break;
       }
     } catch (e) {}
   }
 
-  // open redirect (light)
-  const redirectParams = ["url", "redirect", "next", "return", "returnTo", "goto", "dest", "redirect_uri", "continue"];
-  const evil = "https://example.com/vxscan-redirect-test";
-  for (let i = 0; i < redirectParams.length; i++) {
-    const param = redirectParams[i];
-    try {
-      const testUrl = new URL(pageUrl);
-      testUrl.searchParams.set(param, evil);
-      const resp = await fetch(testUrl.toString(), { credentials: "omit", redirect: "manual" });
-      const loc = resp.headers.get("Location") || resp.headers.get("location") || "";
-      if (resp.status >= 300 && resp.status < 400 && loc.indexOf("example.com") !== -1) {
-        extra.push({
-          severity: "high",
-          type: "Open redirect confirmed",
-          detail: 'Parameter "' + param + '" redirects to external URL'
-        });
-        break;
-      }
-    } catch (e) {}
-  }
-
-  // CORS
-  try {
-    const resp = await fetch(pageUrl, {
-      method: "GET",
-      credentials: "omit",
-      headers: { Origin: "https://evil-vxscan.example" }
-    });
-    const acao = resp.headers.get("Access-Control-Allow-Origin") || "";
-    if (acao === "https://evil-vxscan.example" || acao === "*") {
-      extra.push({
-        severity: "medium",
-        type: "CORS misconfiguration",
-        detail: "Access-Control-Allow-Origin reflects: " + acao
-      });
-    }
-  } catch (e) {}
-
-  // path discovery (batched + timeout)
+  // soft-404 baseline then path probes
   const commonPaths = [
     "/admin", "/admin/", "/login", "/wp-admin", "/wp-login.php", "/dashboard", "/panel",
     "/.env", "/.git/HEAD", "/.git/config", "/robots.txt", "/sitemap.xml", "/phpinfo.php",
     "/api", "/api/v1", "/graphql", "/swagger", "/actuator", "/actuator/health",
     "/server-status", "/config", "/backup", "/debug", "/console", "/manager"
   ];
-  const origin = u.origin;
+
+  let baselineStatus = null;
+  let baselineLen = -1;
+  try {
+    const randPath = "/vxscan-not-a-real-path-" + Date.now();
+    const baseResp = await fetch(origin + randPath, { credentials: "omit", redirect: "manual" });
+    baselineStatus = baseResp.status;
+    const baseText = await baseResp.text();
+    baselineLen = baseText.length;
+  } catch (e) {}
+
   const foundPaths = [];
 
   async function probe(path) {
@@ -247,9 +223,20 @@ async function runActiveChecks(pageUrl) {
         signal: ctrl.signal
       });
       clearTimeout(t);
-      if (resp.status && resp.status !== 404 && resp.status !== 410 && resp.status !== 0) {
-        foundPaths.push(path + " (" + resp.status + ")");
+      if (!resp.status || resp.status === 0) return;
+      // skip soft-404: same status as random path (and similar size when 200)
+      if (baselineStatus && resp.status === baselineStatus) {
+        if (resp.status === 200 || resp.status === 403 || resp.status === 404) {
+          try {
+            const body = await resp.clone().text();
+            if (baselineLen >= 0 && Math.abs(body.length - baselineLen) < 80) return;
+          } catch (e) {}
+          // if baseline was 403/404 and probe matches, treat as non-existent
+          if (baselineStatus === 403 || baselineStatus === 404) return;
+        }
       }
+      if (resp.status === 404 || resp.status === 410) return;
+      foundPaths.push(path + " (" + resp.status + ")");
     } catch (e) {
       clearTimeout(t);
     }
@@ -261,20 +248,15 @@ async function runActiveChecks(pageUrl) {
     setProgress("path discovery " + Math.min(i + 5, commonPaths.length) + "/" + commonPaths.length);
   }
 
-  const interesting = foundPaths.filter(function (p) {
-    return !p.endsWith("(403)") && !p.endsWith("(404)") && !p.endsWith("(410)");
-  });
-  if (interesting.length) {
-    extra.push({ severity: "info", type: "Interesting paths found", detail: interesting.join(", ") });
-  } else if (foundPaths.length) {
+  if (foundPaths.length) {
     extra.push({
       severity: "info",
-      type: "Path probe summary",
-      detail: foundPaths.length + " paths probed — mostly blocked (403/404). Protection likely in place."
+      type: "Interesting paths found",
+      detail: foundPaths.join(", ")
     });
   }
 
-  // robots.txt
+  // robots / sitemap
   try {
     const robotsResp = await fetch(origin + "/robots.txt", { credentials: "omit" });
     if (robotsResp.ok) {
@@ -286,8 +268,31 @@ async function runActiveChecks(pageUrl) {
     }
   } catch (e) {}
 
+  // open-redirect: check webRequest redirect cache for cross-host redirects from probe URLs
+  try {
+    const redir = await new Promise(function (resolve) {
+      chrome.runtime.sendMessage({ type: "get_redirects" }, function (resp) {
+        resolve((resp && resp.redirects) || {});
+      });
+    });
+    const hits = [];
+    Object.keys(redir).forEach(function (fromUrl) {
+      if (fromUrl.indexOf(origin) === 0) {
+        hits.push(fromUrl + " → " + redir[fromUrl].to);
+      }
+    });
+    if (hits.length) {
+      extra.push({
+        severity: "medium",
+        type: "Cross-origin redirect",
+        detail: hits.slice(0, 5).join(" | ")
+      });
+    }
+  } catch (e) {}
+
   return extra;
 }
+
 
 function renderFindings(data) {
   if (!data) {
@@ -304,9 +309,13 @@ function renderFindings(data) {
   document.getElementById("sumLow").textContent = sum.low || 0;
   document.getElementById("sumInfo").textContent = sum.info || 0;
 
-  const s = typeof data.score === "number" ? data.score : 100;
-  scoreEl.textContent = s;
-  scoreEl.className = "stat-value score " + (s >= 80 ? "good" : s >= 50 ? "mid" : "bad");
+  let risk = data.risk || "info";
+  if ((sum.high || 0) > 0) risk = "high";
+  else if ((sum.medium || 0) > 0) risk = "medium";
+  else if ((sum.low || 0) > 0) risk = "low";
+  const riskLabel = { high: "HIGH", medium: "MED", low: "LOW", info: "OK" };
+  scoreEl.textContent = riskLabel[risk] || "OK";
+  scoreEl.className = "stat-value score " + (risk === "info" || risk === "low" ? "good" : risk === "medium" ? "mid" : "bad");
 
   applyFilter();
 }
@@ -343,7 +352,7 @@ function applyFilter() {
     btn.addEventListener("click", function () {
       const i = parseInt(btn.getAttribute("data-idx"), 10);
       const item = list[i];
-      const text = item.full || (item.type + ": " + item.detail);
+      const text = item.type + ": " + item.detail;
       navigator.clipboard.writeText(text).then(function () {
         btn.textContent = "copied";
         setTimeout(function () { btn.textContent = "copy"; }, 1000);
@@ -366,7 +375,7 @@ function saveToHistory(scan) {
     let hist = data.scanHistory || [];
     hist.unshift({
       url: scan.url,
-      score: scan.score,
+      risk: scan.risk || "info",
       timestamp: scan.timestamp || Date.now(),
       summary: scan.summary || {},
       findingsCount: (scan.findings || []).length
@@ -385,7 +394,7 @@ function loadHistory() {
     historyList.innerHTML = hist.map(function (h) {
       return '<div class="hist-item">' +
         '<div class="hist-url">' + escapeHtml(h.url) + '</div>' +
-        '<div class="hist-meta">score ' + h.score + ' · ' + h.findingsCount + ' findings · ' +
+        '<div class="hist-meta">' + (h.risk || h.score || '') + ' · ' + h.findingsCount + ' findings · ' +
         new Date(h.timestamp).toLocaleString() + '</div></div>';
     }).join("");
   });
@@ -422,8 +431,7 @@ function loadTabs() {
       if (!pick) pick = tabs.find(function (t) { return t.active; }) || tabs[0];
       selectedTabId = pick.id;
       tabSelect.value = String(pick.id);
-      showTarget(pick.url);
-      if (pick.favIconUrl) targetFav.src = pick.favIconUrl;
+      showTarget(pick.url, pick.favIconUrl || "");
       resolve(tabs);
     });
   });
@@ -518,9 +526,11 @@ async function runScan() {
       scan.summary = scan.summary || { high: 0, medium: 0, low: 0, info: 0 };
       activeFindings.forEach(function (f) {
         scan.summary[f.severity] = (scan.summary[f.severity] || 0) + 1;
-        if (f.severity === "high") scan.score = Math.max(0, (scan.score || 100) - 15);
-        if (f.severity === "medium") scan.score = Math.max(0, (scan.score || 100) - 8);
       });
+      if ((scan.summary.high || 0) > 0) scan.risk = "high";
+      else if ((scan.summary.medium || 0) > 0) scan.risk = "medium";
+      else if ((scan.summary.low || 0) > 0) scan.risk = "low";
+      else scan.risk = "info";
     }
 
     scan.timestamp = Date.now();
@@ -569,11 +579,11 @@ exportBtn.addEventListener("click", function () {
     return;
   }
   const findings = (lastScanData.findings || []).map(function (f) {
-    return { severity: f.severity, type: f.type, detail: f.full || f.detail };
+    return { severity: f.severity, type: f.type, detail: f.exportDetail || f.detail };
   });
   let md = "# VulnScan Report\n\n";
   md += "**URL:** " + lastScanData.url + "\n\n";
-  md += "**Score:** " + lastScanData.score + "/100\n\n";
+  md += "**Risk:** " + (lastScanData.risk || "n/a") + "\n\n";
   md += "**Time:** " + new Date(lastScanData.timestamp || Date.now()).toISOString() + "\n\n";
   md += "## Findings\n\n";
   findings.forEach(function (f) {
@@ -597,7 +607,7 @@ exportBtn.addEventListener("contextmenu", function (e) {
     score: lastScanData.score,
     summary: lastScanData.summary,
     findings: (lastScanData.findings || []).map(function (f) {
-      return { severity: f.severity, type: f.type, detail: f.full || f.detail };
+      return { severity: f.severity, type: f.type, detail: f.exportDetail || f.detail };
     })
   };
   const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
@@ -647,8 +657,7 @@ if (tabSelect) {
     // fetch full tab for favicon/url
     getSelectedTab().then(function (tab) {
       if (tab) {
-        showTarget(tab.url);
-        if (tab.favIconUrl) targetFav.src = tab.favIconUrl;
+        showTarget(tab.url, tab.favIconUrl || "");
       }
     });
   });

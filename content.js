@@ -13,7 +13,7 @@
   const pageURL = location.href;
   const pageLower = pageText.toLowerCase();
 
-  // DOM XSS sinks
+  // sinks
   const sinks = [
     { name: "innerHTML", points: 8 },
     { name: "outerHTML", points: 8 },
@@ -36,7 +36,7 @@
     }
   });
 
-  // secrets / keys
+  // secrets
   const secretPatterns = [
     { name: "AWS Access Key", re: /AKIA[0-9A-Z]{16}/, points: 25 },
     { name: "AWS Secret Key", re: /aws[_-]?secret[_-]?access[_-]?key['"]?\s*[:=]\s*['"][A-Za-z0-9\/+=]{30,}/i, points: 30 },
@@ -58,22 +58,20 @@
   secretPatterns.forEach(function (p) {
     const match = pageText.match(p.re);
     if (match) {
-      const full = match[0];
-      const display = full.length > 50 ? full.substring(0, 50) + "..." : full;
-      // store full value for export
+      const raw = match[0];
+      const prefix = raw.slice(0, 4);
       findings.push({
         severity: "high",
         type: "Possible secret",
-        detail: p.name + ": " + display,
-        full: p.name + ": " + full,
-        points: p.points
+        detail: p.name + " (hidden — use export to view)",
+        exportDetail: p.name + ": " + raw,
+        _points: p.points
       });
       summary.high = (summary.high || 0) + 1;
-      score = Math.max(0, score - p.points);
     }
   });
 
-  // forms / CSRF
+  // forms
   document.querySelectorAll("form").forEach(function (form) {
     const method = (form.method || "get").toLowerCase();
     if (method === "post") {
@@ -104,7 +102,7 @@
     }
   });
 
-  // cookies visible to JS
+  // document.cookie
   if (document.cookie) {
     document.cookie.split(";").forEach(function (c) {
       const name = c.trim().split("=")[0];
@@ -114,7 +112,7 @@
     });
   }
 
-  // frame busting
+  // framing
   if (pageText.indexOf("top.location") === -1 &&
       pageText.indexOf("self === top") === -1 &&
       pageText.indexOf("window.top") === -1 &&
@@ -122,7 +120,7 @@
     add("info", "No frame-busting script detected", "May be vulnerable to clickjacking if headers are also missing", 4);
   }
 
-  // library versions
+  // libs
   const libChecks = [
     { name: "jQuery", re: /jquery[.-]?([0-9]+\.[0-9]+(?:\.[0-9]+)?)/i, bad: ["1.", "2.0", "2.1", "2.2"], points: 10 },
     { name: "AngularJS", re: /angular(?:\.js)?[.-/]([0-9]+\.[0-9]+)/i, bad: ["1."], points: 12 },
@@ -149,7 +147,7 @@
     }
   });
 
-  // sensitive comments
+  // comments
   const commentPatterns = [
     { re: /password\s*[:=]\s*['"][^'"]{3,}['"]/i, label: "Password in comment/code" },
     { re: /todo[:\s].{8,90}/i, label: "TODO comment" },
@@ -166,7 +164,7 @@
     }
   });
 
-  // open redirect params
+  // redirect params
   const redirectParams = ["url=", "redirect=", "next=", "return=", "returnto=", "goto=", "dest=", "destination=", "redir=", "redirect_uri=", "continue=", "return_url="];
   redirectParams.forEach(function (p) {
     if (pageURL.toLowerCase().indexOf(p) !== -1 || pageLower.indexOf(p) !== -1) {
@@ -174,7 +172,7 @@
     }
   });
 
-  // password fields
+  // passwords
   document.querySelectorAll("input[type='password']").forEach(function (input) {
     const ac = (input.getAttribute("autocomplete") || "").toLowerCase();
     if (ac === "on" || ac === "") {
@@ -182,7 +180,7 @@
     }
   });
 
-  // scripts without SRI
+  // sri
   document.querySelectorAll("script[src]").forEach(function (script) {
     const src = script.src;
     if (src && (src.indexOf("http://") === 0 || src.indexOf("https://") === 0)) {
@@ -195,7 +193,7 @@
     }
   });
 
-  // tech fingerprint
+  // stack hints
   const tech = [
     { name: "WordPress", re: /wp-content|wp-includes|wordpress/i },
     { name: "Drupal", re: /drupal|sites\/default\/files/i },
@@ -215,7 +213,7 @@
     }
   });
 
-  // sensitive path refs
+  // path strings
   const sensitiveHints = [".git", ".env", ".bak", ".old", ".swp", "phpinfo", "adminer", "server-status", "wp-config", ".DS_Store", "web.config"];
   sensitiveHints.forEach(function (h) {
     if (pageLower.indexOf(h.toLowerCase()) !== -1) {
@@ -223,18 +221,22 @@
     }
   });
 
-  // inline handlers
+  // on* handlers
   const inlineEvents = document.querySelectorAll("[onclick], [onerror], [onload], [onmouseover], [onfocus], [onblur]");
   if (inlineEvents.length > 0) {
     add("low", "Inline event handlers present", inlineEvents.length + " element(s) with inline JS events", 3);
   }
 
-  // post results
+  let risk = "info";
+  if ((summary.high || 0) > 0) risk = "high";
+  else if ((summary.medium || 0) > 0) risk = "medium";
+  else if ((summary.low || 0) > 0) risk = "low";
+
   chrome.runtime.sendMessage({
     type: "scan_results",
     url: pageURL,
     findings: findings,
-    score: score,
-    summary: summary
+    summary: summary,
+    risk: risk
   });
 })();

@@ -7,39 +7,56 @@
 </head>
 <body>
   <div class="header">
-    <div>
-      <h1>Vuln Scanner Ultimate</h1>
-      <div id="score" class="score">--</div>
+    <div class="brand">
+      <div class="logo">◈</div>
+      <div>
+        <h1>VULN<span>SCAN</span></h1>
+        <div id="score" class="score">SCORE --/100</div>
+      </div>
     </div>
     <div class="header-actions">
-      <button id="exportBtn" title="Export JSON">Export</button>
-      <button id="scanBtn">Scan Page</button>
+      <button id="clearBtn" title="Clear results">CLR</button>
+      <button id="historyBtn" title="Scan history">HIST</button>
+      <button id="exportBtn" title="Export (right-click for JSON)">EXPORT</button>
+      <button id="scanBtn">SCAN</button>
     </div>
   </div>
 
-  <div id="status">Click "Scan Page" to analyze this tab</div>
+  <div id="status" class="status">// awaiting target... (press S to scan)</div>
+  <div id="progress" class="progress" style="display:none;"></div>
+  <div id="targetPreview" class="target-preview" style="display:none;">
+    <img id="targetFavicon" class="target-fav" alt="">
+    <span id="targetHost" class="target-host"></span>
+  </div>
 
   <div id="summaryBar" class="summary-bar" style="display:none;">
-    <span class="sum high" id="sumHigh">0 High</span>
-    <span class="sum medium" id="sumMed">0 Medium</span>
-    <span class="sum low" id="sumLow">0 Low</span>
-    <span class="sum info" id="sumInfo">0 Info</span>
+    <span class="sum high" id="sumHigh">0 HIGH</span>
+    <span class="sum medium" id="sumMed">0 MED</span>
+    <span class="sum low" id="sumLow">0 LOW</span>
+    <span class="sum info" id="sumInfo">0 INFO</span>
   </div>
 
   <div class="filters">
-    <button class="filter active" data-sev="all">All</button>
-    <button class="filter" data-sev="high">High</button>
-    <button class="filter" data-sev="medium">Medium</button>
-    <button class="filter" data-sev="low">Low</button>
-    <button class="filter" data-sev="info">Info</button>
+    <button class="filter active" data-sev="all">ALL</button>
+    <button class="filter" data-sev="high">HIGH</button>
+    <button class="filter" data-sev="medium">MED</button>
+    <button class="filter" data-sev="low">LOW</button>
+    <button class="filter" data-sev="info">INFO</button>
   </div>
 
+  <div id="historyPanel" class="history-panel" style="display:none;"></div>
+
   <div id="headerSection" class="header-section" style="display:none;">
-    <div class="section-title">Security Headers</div>
+    <div class="section-title">
+      <span>// SECURITY_HEADERS</span>
+      <button id="toggleHeaders" class="toggle-btn">hide</button>
+    </div>
     <div id="headerResults"></div>
   </div>
 
   <div id="results"></div>
+
+  <div class="footer">v3.3 · S = scan · E = export · C = clear</div>
 
   <script src="popup.js"></script>
 </body>

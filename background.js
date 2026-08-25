@@ -1,4 +1,5 @@
 const headerCache = {};
+const redirectCache = {};
 
 chrome.webRequest.onHeadersReceived.addListener(
   function (details) {
@@ -11,13 +12,29 @@ chrome.webRequest.onHeadersReceived.addListener(
     }
   },
   { urls: ["<all_urls>"] },
-  ["responseHeaders"]
+  ["responseHeaders", "extraHeaders"]
 );
 
-// Open dashboard as a full tab when icon is clicked
+chrome.webRequest.onBeforeRedirect.addListener(
+  function (details) {
+    if (!details.url) return;
+    try {
+      const from = new URL(details.url);
+      const to = new URL(details.redirectUrl);
+      if (from.hostname !== to.hostname) {
+        redirectCache[details.url] = {
+          to: details.redirectUrl,
+          status: details.statusCode,
+          tabId: details.tabId
+        };
+      }
+    } catch (e) {}
+  },
+  { urls: ["<all_urls>"] }
+);
+
 chrome.action.onClicked.addListener(async function () {
   const url = chrome.runtime.getURL("dashboard.html");
-  // focus existing dashboard tab if open
   const tabs = await chrome.tabs.query({ url: url });
   if (tabs && tabs.length > 0) {
     await chrome.tabs.update(tabs[0].id, { active: true });
@@ -29,13 +46,24 @@ chrome.action.onClicked.addListener(async function () {
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === "scan_results") {
+    // never persist raw secrets — redact any full fields
+    const findings = (message.findings || []).map(function (f) {
+      const copy = {
+        severity: f.severity,
+        type: f.type,
+        detail: f.detail
+      };
+      // exportDetail kept for export only — UI uses detail
+      if (f.exportDetail) copy.exportDetail = f.exportDetail;
+      return copy;
+    });
     chrome.storage.local.set({
       lastScan: {
         url: message.url,
-        findings: message.findings,
+        findings: findings,
         timestamp: Date.now(),
-        score: message.score || 0,
-        summary: message.summary || {}
+        summary: message.summary || {},
+        risk: message.risk || "info"
       }
     });
     return;
@@ -44,6 +72,11 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === "get_headers") {
     const data = headerCache[message.tabId] || { headers: [], url: "", statusCode: 0 };
     sendResponse(data);
+    return true;
+  }
+
+  if (message.type === "get_redirects") {
+    sendResponse({ redirects: redirectCache });
     return true;
   }
 

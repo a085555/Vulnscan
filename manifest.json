@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vuln Scanner Ultimate",
-  "version": "4.0",
+  "version": "5.0",
   "description": "Full-page passive + light active website vulnerability scanner",
   "permissions": [
     "activeTab",
