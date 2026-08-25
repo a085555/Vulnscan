@@ -52,6 +52,15 @@ function createDashboard() {
     createElement("filter-all", { "data-sev": "all" }),
     createElement("filter-high", { "data-sev": "high" })
   ];
+  const modeInputs = [
+    createElement("mode-passive"),
+    createElement("mode-safe"),
+    createElement("mode-lab")
+  ];
+  modeInputs[0].value = "passive";
+  modeInputs[0].checked = true;
+  modeInputs[1].value = "safe";
+  modeInputs[2].value = "lab";
   let runtimeListener = null;
   let onUpdatedListener = null;
   let currentScanId = null;
@@ -67,6 +76,7 @@ function createDashboard() {
   let headerResponse = { headers: [], url: "", statusCode: 0 };
   let reloadCount = 0;
   let fetchCount = 0;
+  const fetchUrls = [];
   let exportSecretsResponse = { secrets: [], available: false };
   let savedRequestLog = { scanId: null, entries: [], summary: null };
   const sentMessages = [];
@@ -77,6 +87,7 @@ function createDashboard() {
     querySelectorAll: function (selector) {
       if (selector === ".bucket-filter") return bucketButtons;
       if (selector === ".filter") return filterButtons;
+      if (selector === "input[name='scanModeChoice']") return modeInputs;
       return [];
     },
     addEventListener: function () {},
@@ -85,7 +96,7 @@ function createDashboard() {
   const chrome = {
     runtime: {
       lastError: null,
-      getManifest: function () { return { version: "5.3.0" }; },
+      getManifest: function () { return { version: "5.4.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -135,7 +146,7 @@ function createDashboard() {
       executeScript: async function (options) {
         if (options.files && options.files.includes("content.js")) {
           storage.lastScan = {
-            schemaVersion: 3,
+            schemaVersion: 4,
             scanId: currentScanId,
             scanMode: "passive",
             url: tabResponse.url,
@@ -153,8 +164,9 @@ function createDashboard() {
     document: document,
     chrome: chrome,
     navigator: { clipboard: { writeText: async function () {} } },
-    fetch: async function () {
+    fetch: async function (value) {
       fetchCount++;
+      fetchUrls.push(String(value || ""));
       return {
         status: 404,
         ok: false,
@@ -180,15 +192,17 @@ function createDashboard() {
     element: element,
     bucketButtons: bucketButtons,
     filterButtons: filterButtons,
+    modeInputs: modeInputs,
     runtimeListener: function () { return runtimeListener; },
     sentMessages: sentMessages,
     storage: storage,
     setRedirects: function (value) { redirectResponse = value; },
-    setFetch: function (value) { context.fetch = async function () { fetchCount++; return value.apply(null, arguments); }; },
+    setFetch: function (value) { context.fetch = async function () { fetchCount++; fetchUrls.push(String(arguments[0] || "")); return value.apply(null, arguments); }; },
     setTabResponse: function (value) { tabResponse = value; },
     setExportSecrets: function (value) { exportSecretsResponse = value; },
     getReloadCount: function () { return reloadCount; },
-    getFetchCount: function () { return fetchCount; }
+    getFetchCount: function () { return fetchCount; },
+    getFetchUrls: function () { return fetchUrls.slice(); }
   };
 }
 
@@ -216,7 +230,7 @@ test("renders actionable and review counts separately", function () {
     verification: "verify"
   });
   dashboard.context.renderFindings({
-    schemaVersion: 3,
+    schemaVersion: 4,
     scanId: "scan-1",
     url: "https://example.test/",
     urlFingerprint: model.key("https://example.test/"),
@@ -229,6 +243,25 @@ test("renders actionable and review counts separately", function () {
   dashboard.bucketButtons[1].listeners.click();
   assert.match(dashboard.element("results").innerHTML, /Review clue/);
   assert.match(dashboard.element("results").innerHTML, /Evidence &amp; verification/);
+});
+
+test("shows INFO for informational findings and OK only for an empty scan", function () {
+  const dashboard = createDashboard();
+  const model = dashboard.context.VulnscanFindings;
+  const base = {
+    schemaVersion: 4,
+    scanId: "scan-risk",
+    scanMode: "passive",
+    url: "https://example.test/",
+    urlFingerprint: model.key("https://example.test/"),
+    timestamp: Date.now()
+  };
+  dashboard.context.renderFindings(Object.assign({}, base, { findings: [model.normalize({
+    checkId: "info.finding", severity: "info", confidence: "high", bucket: "finding", type: "Informational finding"
+  })] }));
+  assert.equal(dashboard.element("score").textContent, "INFO");
+  dashboard.context.renderFindings(Object.assign({}, base, { findings: [] }));
+  assert.equal(dashboard.element("score").textContent, "OK");
 });
 
 test("requires exact generated redirect evidence", async function () {
@@ -290,7 +323,7 @@ test("passive mode sends no scanner requests or target reloads", async function 
   await dashboard.context.runScan();
   assert.equal(dashboard.getReloadCount(), 0);
   assert.equal(dashboard.getFetchCount(), 0);
-  assert.equal(dashboard.storage.lastScan.schemaVersion, 3);
+  assert.equal(dashboard.storage.lastScan.schemaVersion, 4);
   assert.equal(dashboard.storage.lastScan.scanMode, "passive");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_begin"; }), true);
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_end"; }), true);
@@ -314,12 +347,89 @@ test("safe active mode requires confirmation and uses its request budget", async
   assert.equal(dashboard.storage.lastScan.requestSummary.attempted, 13);
 });
 
+test("Full Scan runs Safe Active and Lab once under one shared budget", async function () {
+  const dashboard = createDashboard();
+  dashboard.element("fullScanToggle").checked = true;
+  dashboard.element("fullScanToggle").listeners.change();
+  dashboard.element("requestBudget").value = "20";
+  assert.equal(dashboard.element("scanMode").value, "full");
+  assert.equal(dashboard.element("scanModeSummary").textContent, "Full Scan");
+
+  await dashboard.context.loadTabs();
+  const scan = dashboard.context.runScan();
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  dashboard.element("authorizationCheck").checked = true;
+  dashboard.element("authorizationCheck").listeners.change();
+  dashboard.element("authorizationStart").listeners.click();
+  await scan;
+
+  assert.equal(dashboard.getFetchCount(), 20);
+  assert.equal(new Set(dashboard.getFetchUrls()).size, 20);
+  assert.equal(dashboard.storage.lastScan.scanMode, "full");
+  assert.equal(dashboard.storage.lastScan.requestSummary.mode, "full");
+  assert.equal(dashboard.storage.lastScan.stageSummary.safe, "complete");
+  assert.equal(dashboard.storage.lastScan.stageSummary.lab, "stopped");
+});
+
+test("Lab mode runs path discovery without Safe Active query probes", async function () {
+  const dashboard = createDashboard();
+  dashboard.element("scanMode").value = "lab";
+  dashboard.element("requestBudget").value = "20";
+  await dashboard.context.loadTabs();
+  const scan = dashboard.context.runScan();
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  dashboard.element("authorizationCheck").checked = true;
+  dashboard.element("authorizationCheck").listeners.change();
+  dashboard.element("authorizationStart").listeners.click();
+  await scan;
+
+  assert.equal(dashboard.getFetchCount(), 20);
+  assert.equal(dashboard.getFetchUrls().every(function (value) { return new URL(value).search === ""; }), true);
+  assert.equal(dashboard.storage.lastScan.stageSummary.safe, "skipped");
+});
+
+test("groups results and applies search, category, confidence, and stage filters", function () {
+  const dashboard = createDashboard();
+  const model = dashboard.context.VulnscanFindings;
+  const first = model.normalize({
+    checkId: "one", severity: "medium", confidence: "high", bucket: "finding", category: "transport",
+    type: "First result", detail: "mixed content", source: "passive"
+  });
+  const second = model.normalize({
+    checkId: "two", severity: "low", confidence: "medium", bucket: "finding", category: "redirects",
+    type: "Second result", detail: "redirect confirmed", source: "safe-active"
+  });
+  dashboard.context.renderFindings({
+    schemaVersion: 4,
+    scanId: "scan-filter",
+    scanMode: "full",
+    url: "https://example.test/",
+    urlFingerprint: model.key("https://example.test/"),
+    timestamp: Date.now(),
+    findings: [first, second]
+  });
+  assert.match(dashboard.element("results").innerHTML, /Transport/);
+  assert.match(dashboard.element("results").innerHTML, /Redirects/);
+
+  dashboard.element("resultSearch").value = "second";
+  dashboard.element("resultSearch").listeners.input();
+  assert.doesNotMatch(dashboard.element("results").innerHTML, /First result/);
+  assert.match(dashboard.element("results").innerHTML, /Second result/);
+
+  dashboard.element("resultSearch").value = "";
+  dashboard.element("resultSearch").listeners.input();
+  dashboard.element("sourceFilter").value = "passive";
+  dashboard.element("sourceFilter").listeners.change();
+  assert.match(dashboard.element("results").innerHTML, /First result/);
+  assert.doesNotMatch(dashboard.element("results").innerHTML, /Second result/);
+});
+
 test("redacted reports never include raw secret values", function () {
   const dashboard = createDashboard();
   const model = dashboard.context.VulnscanFindings;
   const raw = "sk_live_" + "Z".repeat(24);
   const scan = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     scanId: "scan-export",
     scanMode: "passive",
     url: "https://example.test/",
@@ -340,6 +450,7 @@ test("redacted reports never include raw secret values", function () {
   dashboard.setExportSecrets({ secrets: [raw], available: true });
   assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
   assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
+  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "4.0");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
 
   dashboard.element("exportSecretsBtn").listeners.click();

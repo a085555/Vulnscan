@@ -18,11 +18,21 @@ const reviewCountEl = document.getElementById("reviewCount");
 const brandVersion = document.getElementById("brandVersion");
 const aboutVersion = document.getElementById("aboutVersion");
 const scanModeEl = document.getElementById("scanMode");
+const scanModePicker = document.getElementById("scanModePicker");
+const scanModeSummary = document.getElementById("scanModeSummary");
+const fullScanToggle = document.getElementById("fullScanToggle");
 const requestBudgetEl = document.getElementById("requestBudget");
 const modeHelp = document.getElementById("modeHelp");
+const stageProgressEl = document.getElementById("stageProgress");
+const resultOverviewEl = document.getElementById("resultOverview");
+const resultSearchEl = document.getElementById("resultSearch");
+const categoryFilterEl = document.getElementById("categoryFilter");
+const confidenceFilterEl = document.getElementById("confidenceFilter");
+const sourceFilterEl = document.getElementById("sourceFilter");
 const cancelScanBtn = document.getElementById("cancelScanBtn");
 const requestLogEl = document.getElementById("requestLog");
 const requestSummaryEl = document.getElementById("requestSummary");
+const toggleRequestLogBtn = document.getElementById("toggleRequestLog");
 const exportMenu = document.getElementById("exportMenu");
 const exportMarkdownBtn = document.getElementById("exportMarkdownBtn");
 const exportJsonBtn = document.getElementById("exportJsonBtn");
@@ -42,6 +52,10 @@ let selectedTabId = null;
 let currentFindings = [];
 let currentFilter = "all";
 let currentBucket = "finding";
+let currentSearch = "";
+let currentCategory = "all";
+let currentConfidence = "all";
+let currentSource = "all";
 let lastScanData = null;
 let scanning = false;
 let secretVault = [];
@@ -145,7 +159,7 @@ function storageGet(key) {
 }
 
 function requestMode() {
-  return ["passive", "safe", "lab"].includes(scanModeEl.value) ? scanModeEl.value : "passive";
+  return ["passive", "safe", "lab", "full"].includes(scanModeEl.value) ? scanModeEl.value : "passive";
 }
 
 function requestBudget() {
@@ -157,13 +171,14 @@ function requestBudget() {
 function estimateRequests(mode) {
   if (mode === "passive") return 0;
   if (mode === "safe") return 13;
+  if (mode === "lab") return 25;
   return 38;
 }
 
 function normalizeRequestSummary(summary, mode) {
   const source = summary && typeof summary === "object" ? summary : {};
   return {
-    mode: ["passive", "safe", "lab", "legacy"].includes(source.mode) ? source.mode : mode,
+    mode: ["passive", "safe", "lab", "full", "legacy"].includes(source.mode) ? source.mode : mode,
     budget: Math.max(0, Math.min(50, Number(source.budget) || 0)),
     attempted: Math.max(0, Number(source.attempted) || 0),
     completed: Math.max(0, Number(source.completed) || 0),
@@ -175,9 +190,43 @@ function updateModeHelp() {
   const copy = {
     passive: "No scanner-generated requests.",
     safe: "Same-origin GET, HEAD, and OPTIONS checks.",
-    lab: "Safe checks plus controlled common-path discovery."
+    lab: "Soft-404-aware common-path discovery only.",
+    full: "Passive, Safe Active, and Lab run in order with one shared budget."
   };
-  modeHelp.textContent = copy[requestMode()];
+  const labels = { passive: "Passive", safe: "Safe Active", lab: "Lab", full: "Full Scan" };
+  const mode = requestMode();
+  modeHelp.textContent = copy[mode];
+  if (scanModeSummary) scanModeSummary.textContent = labels[mode];
+}
+
+function blankStageSummary(mode) {
+  return {
+    passive: "pending",
+    headers: "pending",
+    safe: mode === "safe" || mode === "full" ? "pending" : "skipped",
+    lab: mode === "lab" || mode === "full" ? "pending" : "skipped"
+  };
+}
+
+function normalizeStageSummary(summary, mode) {
+  const allowed = ["pending", "running", "complete", "skipped", "stopped", "unavailable"];
+  const source = summary && typeof summary === "object" ? summary : blankStageSummary(mode);
+  const fallback = blankStageSummary(mode);
+  const output = {};
+  ["passive", "headers", "safe", "lab"].forEach(function (stage) {
+    output[stage] = allowed.includes(source[stage]) ? source[stage] : fallback[stage];
+  });
+  return output;
+}
+
+function renderStages(summary, visible) {
+  if (!stageProgressEl) return;
+  stageProgressEl.hidden = visible === false;
+  const stages = summary || blankStageSummary(requestMode());
+  stageProgressEl.querySelectorAll(".scan-stage").forEach(function (item) {
+    const state = stages[item.getAttribute("data-stage")] || "pending";
+    item.className = "scan-stage " + state;
+  });
 }
 
 function renderRequestLog(entries, summary) {
@@ -187,9 +236,11 @@ function renderRequestLog(entries, summary) {
   } else {
     requestLogEl.innerHTML = rows.map(function (entry) {
       const duration = Number(entry.durationMs !== undefined ? entry.durationMs : entry.duration) || 0;
+      const outcome = entry.outcome || (entry.status ? "complete" : "unknown");
+      const status = entry.status ? String(entry.status) + " " + outcome : outcome;
       return '<div class="request-row"><span class="request-method">' + escapeHtml(entry.method) +
         '</span><span class="request-url">' + escapeHtml(entry.url) +
-        '</span><span class="request-status">' + escapeHtml(entry.status || entry.outcome) +
+        '</span><span class="request-status ' + escapeHtml(outcome) + '">' + escapeHtml(status) +
         '</span><span class="request-duration">' + duration + " ms</span></div>";
     }).join("");
   }
@@ -202,9 +253,11 @@ function renderRequestLog(entries, summary) {
 }
 
 function confirmActiveScan(origin, mode, budget) {
-  authorizationDetails.textContent = (mode === "lab" ? "Lab" : "Safe Active") + " mode will send up to " +
-    Math.min(budget, estimateRequests(mode)) + " same-origin requests to " + origin +
-    ". Allowed methods: GET, HEAD, OPTIONS" + (mode === "lab" ? ", POST. This patch does not use POST checks yet." : ".");
+  const names = { safe: "Safe Active", lab: "Lab", full: "Full Scan" };
+  const stageCopy = mode === "full" ? " Passive inspection runs once, followed by Safe Active and Lab stages." : "";
+  authorizationDetails.textContent = names[mode] + " mode will send up to " +
+    Math.min(budget, estimateRequests(mode)) + " same-origin requests to " + origin + "." + stageCopy +
+    " Allowed methods: GET, HEAD, and OPTIONS.";
   authorizationCheck.checked = false;
   authorizationStart.disabled = true;
   authorizationModal.hidden = false;
@@ -219,11 +272,11 @@ function finishAuthorization(approved) {
 }
 
 function normalizeScan(scan) {
-  if (!scan || (scan.schemaVersion !== 2 && scan.schemaVersion !== 3) || !scan.url || !scan.urlFingerprint) return null;
+  if (!scan || ![2, 3, 4].includes(scan.schemaVersion) || !scan.url || !scan.urlFingerprint) return null;
   const findings = VulnscanFindings.dedupe(scan.findings || []);
-  const mode = ["passive", "safe", "lab"].includes(scan.scanMode) ? scan.scanMode : "legacy";
+  const mode = ["passive", "safe", "lab", "full"].includes(scan.scanMode) ? scan.scanMode : "legacy";
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     scanId: scan.scanId || null,
     scanMode: mode,
     url: scan.url,
@@ -232,7 +285,8 @@ function normalizeScan(scan) {
     findings: findings,
     summary: VulnscanFindings.summarize(findings),
     risk: VulnscanFindings.risk(findings),
-    requestSummary: normalizeRequestSummary(scan.requestSummary, mode)
+    requestSummary: normalizeRequestSummary(scan.requestSummary, mode),
+    stageSummary: normalizeStageSummary(scan.stageSummary, mode)
   };
 }
 
@@ -251,6 +305,11 @@ function clearResults() {
   scoreEl.className = "stat-value score";
   findingsCountEl.textContent = "0";
   reviewCountEl.textContent = "0";
+  if (resultOverviewEl) {
+    resultOverviewEl.hidden = true;
+    resultOverviewEl.innerHTML = "";
+  }
+  renderStages(null, false);
   renderRequestLog([], null);
   ["sumHigh", "sumMed", "sumLow", "sumInfo"].forEach(function (id) {
     document.getElementById(id).textContent = "0";
@@ -404,96 +463,111 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
   const origin = parsed.origin;
   const settings = options || {};
   const controller = requestController || VulnscanRequests.create({
-    mode: settings.mode || "lab",
+    mode: settings.mode === "safe" ? "safe" : "lab",
     origin: origin,
     budget: settings.budget || 50,
     fetchFn: fetch
   });
-  const mode = settings.mode || controller.mode;
+  const mode = settings.mode || (requestController ? controller.mode : "full");
+  const includeSafe = settings.includeSafe === true || (settings.includeSafe === undefined && (mode === "safe" || mode === "full"));
+  const includeLab = settings.includeLab === true || (settings.includeLab === undefined && (mode === "lab" || mode === "full"));
+  const onStage = typeof settings.onStage === "function" ? settings.onStage : function () {};
 
-  const reflectParams = ["q", "search", "s", "query", "keyword", "term"];
-  for (let i = 0; i < reflectParams.length && controller.canRequest(); i++) {
-    const param = reflectParams[i];
-    const testUrl = new URL(pageUrl);
-    testUrl.searchParams.set(param, canary);
-    const response = await controller.request(testUrl.href, { method: "GET" });
-    if (response.body && response.body.indexOf(canary) !== -1) {
-      extra.push(activeFinding({
-        checkId: "active.reflection",
-        severity: "low",
-        confidence: "medium",
-        bucket: "review",
-        category: "xss",
-        type: "Reflected input",
-        detail: 'Parameter "' + param + '" was reflected in the response.',
-        evidence: "A unique harmless marker was returned verbatim in the response body.",
-        verification: "Locate the reflection context and confirm whether output encoding prevents HTML or script interpretation."
-      }));
-      break;
+  if (includeSafe) {
+    onStage("safe", "running");
+    const reflectParams = ["q", "search", "s", "query", "keyword", "term"];
+    for (let i = 0; i < reflectParams.length && controller.canRequest(); i++) {
+      const param = reflectParams[i];
+      const testUrl = new URL(pageUrl);
+      testUrl.searchParams.set(param, canary);
+      const response = await controller.request(testUrl.href, { method: "GET" });
+      if (response.body && response.body.indexOf(canary) !== -1) {
+        extra.push(activeFinding({
+          source: "safe-active",
+          checkId: "active.reflection",
+          severity: "low",
+          confidence: "medium",
+          bucket: "review",
+          category: "xss",
+          type: "Reflected input",
+          detail: 'Parameter "' + param + '" was reflected in the response.',
+          evidence: "A unique harmless marker was returned verbatim in the response body.",
+          verification: "Locate the reflection context and confirm whether output encoding prevents HTML or script interpretation."
+        }));
+        break;
+      }
     }
-  }
 
-  const redirectParams = ["url", "redirect", "next", "return", "redirect_uri", "continue"];
-  const destination = "https://vxscan-redirect.example/r/" + (scanId || canary);
-  const redirectProbes = [];
-  for (let i = 0; i < redirectParams.length && controller.canRequest(); i++) {
-    const param = redirectParams[i];
-    const testUrl = new URL(pageUrl);
-    testUrl.searchParams.set(param, destination);
-    redirectProbes.push({ param: param, url: comparableUrl(testUrl.href) });
-    await controller.request(testUrl.href, { method: "GET" });
-  }
-  const redirects = await new Promise(function (resolve) {
-    chrome.runtime.sendMessage({ type: "get_redirects", scanId: scanId }, function (response) {
-      resolve((response && response.redirects) || []);
+    const redirectParams = ["url", "redirect", "next", "return", "redirect_uri", "continue"];
+    const destination = "https://vxscan-redirect.example/r/" + (scanId || canary);
+    const redirectProbes = [];
+    for (let i = 0; i < redirectParams.length && controller.canRequest(); i++) {
+      const param = redirectParams[i];
+      const testUrl = new URL(pageUrl);
+      testUrl.searchParams.set(param, destination);
+      redirectProbes.push({ param: param, url: comparableUrl(testUrl.href) });
+      await controller.request(testUrl.href, { method: "GET" });
+    }
+    const redirects = await new Promise(function (resolve) {
+      chrome.runtime.sendMessage({ type: "get_redirects", scanId: scanId }, function (response) {
+        resolve((response && response.redirects) || []);
+      });
     });
-  });
-  const expected = new URL(destination);
-  const match = redirects.find(function (entry) {
-    const probe = redirectProbes.find(function (item) { return comparableUrl(entry.from) === item.url; });
-    if (!probe || !entry.to) return false;
-    try {
-      const actual = new URL(entry.to);
-      if (actual.origin !== expected.origin || actual.pathname !== expected.pathname) return false;
-      entry.param = probe.param;
-      return true;
-    } catch (e) {
-      return false;
-    }
-  });
-  if (match) {
-    extra.push(activeFinding({
-      checkId: "active.open-redirect",
-      severity: "high",
-      confidence: "high",
-      bucket: "finding",
-      category: "redirects",
-      type: "Open redirect confirmed",
-      detail: 'Parameter "' + match.param + '" redirected to the injected external destination.',
-      evidence: redactUrl(match.from) + " → " + redactUrl(match.to),
-      verification: "Repeat with another controlled HTTPS destination and confirm that no allowlist or interstitial blocks the redirect."
-    }));
-  }
-
-  if (controller.canRequest()) {
-    const robots = await controller.request(origin + "/robots.txt", { method: "GET" });
-    const sitemap = robots.ok && robots.body ? robots.body.match(/Sitemap:\s*(\S+)/i) : null;
-    if (sitemap) {
+    const expected = new URL(destination);
+    const match = redirects.find(function (entry) {
+      const probe = redirectProbes.find(function (item) { return comparableUrl(entry.from) === item.url; });
+      if (!probe || !entry.to) return false;
+      try {
+        const actual = new URL(entry.to);
+        if (actual.origin !== expected.origin || actual.pathname !== expected.pathname) return false;
+        entry.param = probe.param;
+        return true;
+      } catch (e) {
+        return false;
+      }
+    });
+    if (match) {
       extra.push(activeFinding({
-        checkId: "active.sitemap",
-        severity: "info",
+        source: "safe-active",
+        checkId: "active.open-redirect",
+        severity: "high",
         confidence: "high",
-        bucket: "review",
-        category: "recon",
-        type: "Sitemap declared",
-        detail: redactUrl(sitemap[1]),
-        evidence: "robots.txt contains a Sitemap directive.",
-        verification: "Open the sitemap and review whether it exposes unexpected application routes."
+        bucket: "finding",
+        category: "redirects",
+        type: "Open redirect confirmed",
+        detail: 'Parameter "' + match.param + '" redirected to the injected external destination.',
+        evidence: redactUrl(match.from) + " → " + redactUrl(match.to),
+        verification: "Repeat with another controlled HTTPS destination and confirm that no allowlist or interstitial blocks the redirect."
       }));
     }
+
+    if (controller.canRequest()) {
+      const robots = await controller.request(origin + "/robots.txt", { method: "GET" });
+      const sitemap = robots.ok && robots.body ? robots.body.match(/Sitemap:\s*(\S+)/i) : null;
+      if (sitemap) {
+        extra.push(activeFinding({
+          source: "safe-active",
+          checkId: "active.sitemap",
+          severity: "info",
+          confidence: "high",
+          bucket: "review",
+          category: "recon",
+          type: "Sitemap declared",
+          detail: redactUrl(sitemap[1]),
+          evidence: "robots.txt contains a Sitemap directive.",
+          verification: "Open the sitemap and review whether it exposes unexpected application routes."
+        }));
+      }
+    }
+    onStage("safe", controller.getSummary().stoppedReason ? "stopped" : "complete");
   }
 
-  if (mode !== "lab" || !controller.canRequest()) return VulnscanFindings.dedupe(extra);
+  if (!includeLab) return VulnscanFindings.dedupe(extra);
+  if (!controller.canRequest()) {
+    onStage("lab", "stopped");
+    return VulnscanFindings.dedupe(extra);
+  }
+  onStage("lab", "running");
 
   const commonPaths = [
     "/admin", "/admin/", "/login", "/wp-admin", "/wp-login.php", "/dashboard", "/panel",
@@ -568,6 +642,7 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
   }
   if (foundPaths.length) {
     extra.push(activeFinding({
+      source: "lab",
       checkId: "active.interesting-paths",
       severity: "info",
       confidence: "medium",
@@ -580,6 +655,8 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
       occurrences: foundPaths.length
     }));
   }
+
+  onStage("lab", controller.getSummary().stoppedReason ? "stopped" : "complete");
 
   return VulnscanFindings.dedupe(extra);
 }
@@ -599,15 +676,62 @@ function renderFindings(data) {
   findingsCountEl.textContent = summary.findings;
   reviewCountEl.textContent = summary.review;
 
-  const labels = { high: "HIGH", medium: "MED", low: "LOW", review: "REVIEW", info: "OK" };
-  scoreEl.textContent = labels[scan.risk] || "OK";
+  const labels = { high: "HIGH", medium: "MED", low: "LOW", review: "REVIEW" };
+  scoreEl.textContent = scan.risk === "info" ? (summary.findings ? "INFO" : "OK") : (labels[scan.risk] || "OK");
   scoreEl.className = "stat-value score " +
     (scan.risk === "high" ? "bad" : scan.risk === "medium" || scan.risk === "review" ? "mid" : "good");
+  renderStages(scan.stageSummary, true);
+  renderOverview(scan);
+  updateCategoryFilter();
   applyFilter();
   chrome.runtime.sendMessage({ type: "get_request_log", scanId: scan.scanId }, function (response) {
     renderRequestLog((response && response.entries) || [], scan.requestSummary || (response && response.summary));
   });
   return true;
+}
+
+function categoryLabel(value) {
+  return String(value || "general").split("-").map(function (part) {
+    return part ? part.charAt(0).toUpperCase() + part.slice(1) : "";
+  }).join(" ");
+}
+
+function sourceLabel(value) {
+  const labels = {
+    passive: "Passive",
+    headers: "Headers",
+    "safe-active": "Safe Active",
+    active: "Active",
+    lab: "Lab"
+  };
+  return labels[value] || categoryLabel(value);
+}
+
+function renderOverview(scan) {
+  if (!resultOverviewEl) return;
+  const counts = {};
+  scan.findings.forEach(function (finding) {
+    counts[finding.category] = (counts[finding.category] || 0) + 1;
+  });
+  const categories = Object.keys(counts).sort(function (left, right) { return counts[right] - counts[left]; }).slice(0, 8);
+  const requestText = scan.requestSummary && scan.requestSummary.mode !== "passive" ?
+    scan.requestSummary.attempted + " request" + (scan.requestSummary.attempted === 1 ? "" : "s") : "no active requests";
+  resultOverviewEl.innerHTML = '<div class="overview-main"><strong>' + escapeHtml(sourceLabel(scan.scanMode)) +
+    '</strong><span>' + scan.summary.findings + ' actionable · ' + scan.summary.review + ' review · ' + requestText + '</span></div>' +
+    '<div class="overview-categories">' + categories.map(function (category) {
+      return '<span>' + escapeHtml(categoryLabel(category)) + ' <strong>' + counts[category] + '</strong></span>';
+    }).join("") + "</div>";
+  resultOverviewEl.hidden = false;
+}
+
+function updateCategoryFilter() {
+  if (!categoryFilterEl) return;
+  const categories = Array.from(new Set(currentFindings.map(function (finding) { return finding.category; }))).sort();
+  if (currentCategory !== "all" && !categories.includes(currentCategory)) currentCategory = "all";
+  categoryFilterEl.innerHTML = '<option value="all">All categories</option>' + categories.map(function (category) {
+    return '<option value="' + escapeHtml(category) + '">' + escapeHtml(categoryLabel(category)) + "</option>";
+  }).join("");
+  categoryFilterEl.value = currentCategory;
 }
 
 function applyFilter() {
@@ -617,9 +741,23 @@ function applyFilter() {
   if (currentFilter !== "all") {
     list = list.filter(function (finding) { return finding.severity === currentFilter; });
   }
+  if (currentCategory !== "all") {
+    list = list.filter(function (finding) { return finding.category === currentCategory; });
+  }
+  if (currentConfidence !== "all") {
+    list = list.filter(function (finding) { return finding.confidence === currentConfidence; });
+  }
+  if (currentSource !== "all") {
+    list = list.filter(function (finding) { return finding.source === currentSource; });
+  }
+  if (currentSearch) {
+    list = list.filter(function (finding) {
+      return [finding.type, finding.detail, finding.evidence, finding.category, finding.source].join(" ").toLowerCase().includes(currentSearch);
+    });
+  }
   if (!list.length) {
     const label = currentBucket === "finding" ? "actionable findings" : "items to review";
-    resultsEl.innerHTML = '<div class="empty-hint">No ' + label + (currentFilter === "all" ? "" : " in this filter") + "</div>";
+    resultsEl.innerHTML = '<div class="empty-hint">No ' + label + " match these filters</div>";
     return;
   }
 
@@ -631,11 +769,20 @@ function applyFilter() {
     return (confidenceOrder[left.confidence] ?? 9) - (confidenceOrder[right.confidence] ?? 9);
   });
 
-  resultsEl.innerHTML = list.map(function (finding, index) {
+  const groups = {};
+  list.forEach(function (finding, index) {
+    if (!groups[finding.category]) groups[finding.category] = [];
+    groups[finding.category].push({ finding: finding, index: index });
+  });
+  resultsEl.innerHTML = Object.keys(groups).map(function (category) {
+    const cards = groups[category].map(function (entry) {
+      const finding = entry.finding;
+      const index = entry.index;
     const occurrences = finding.occurrences > 1 ? '<span class="occurrences">×' + finding.occurrences + "</span>" : "";
     return '<div class="finding ' + finding.severity + '">' +
       '<div class="type"><span class="severity ' + finding.severity + '">' + finding.severity + "</span>" +
       '<span class="confidence ' + finding.confidence + '">' + escapeHtml(finding.confidence) + " confidence</span>" +
+      '<span class="source-badge ' + escapeHtml(finding.source) + '">' + escapeHtml(sourceLabel(finding.source)) + "</span>" +
       '<span class="finding-title">' + escapeHtml(finding.type) + "</span>" + occurrences +
       '<button class="copy-btn" data-idx="' + index + '">copy</button></div>' +
       '<div class="detail">' + escapeHtml(finding.detail) + "</div>" +
@@ -644,6 +791,9 @@ function applyFilter() {
       '<div><strong>Verify:</strong> ' + escapeHtml(finding.verification || "Review the affected behavior manually.") + "</div>" +
       '<div class="finding-source">' + escapeHtml(finding.category) + " · " + escapeHtml(finding.source) + "</div>" +
       "</details></div>";
+    }).join("");
+    return '<section class="finding-group"><div class="finding-group-title"><span>' + escapeHtml(categoryLabel(category)) +
+      '</span><strong>' + groups[category].length + "</strong></div>" + cards + "</section>";
   }).join("");
 
   resultsEl.querySelectorAll(".copy-btn").forEach(function (button) {
@@ -664,7 +814,7 @@ function saveToHistory(scan) {
   chrome.storage.local.get("scanHistory", function (data) {
     const history = data.scanHistory || [];
     history.unshift({
-      schemaVersion: 3,
+      schemaVersion: 4,
       url: scan.url,
       risk: scan.risk,
       timestamp: scan.timestamp,
@@ -672,7 +822,8 @@ function saveToHistory(scan) {
       findingsCount: scan.summary.findings,
       reviewCount: scan.summary.review,
       scanMode: scan.scanMode,
-      requestSummary: scan.requestSummary
+      requestSummary: scan.requestSummary,
+      stageSummary: scan.stageSummary
     });
     chrome.storage.local.set({ scanHistory: history.slice(0, 12) });
   });
@@ -755,7 +906,7 @@ async function waitForScanResult(scanId, pageUrl) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const stored = await storageGet("lastScan");
-    if (stored && stored.schemaVersion === 3 && stored.scanId === scanId && stored.urlFingerprint === urlFingerprint(pageUrl)) {
+    if (stored && stored.schemaVersion === 4 && stored.scanId === scanId && stored.urlFingerprint === urlFingerprint(pageUrl)) {
       return stored;
     }
     await new Promise(function (resolve) { setTimeout(resolve, 100); });
@@ -768,6 +919,8 @@ async function runScan() {
   scanning = true;
   scanBtn.disabled = true;
   scanModeEl.disabled = true;
+  if (scanModePicker) scanModePicker.classList.add("disabled");
+  if (fullScanToggle) fullScanToggle.disabled = true;
   requestBudgetEl.disabled = true;
   cancelScanBtn.hidden = false;
   secretVault = [];
@@ -776,6 +929,8 @@ async function runScan() {
   activeScanId = null;
   currentRequestController = null;
   scanCancelled = false;
+  let stageSummary = blankStageSummary(requestMode());
+  renderStages(stageSummary, true);
   setStatus("// scanning...");
   setProgress("resolving selected tab...");
 
@@ -793,6 +948,8 @@ async function runScan() {
     }
 
     const mode = requestMode();
+    stageSummary = blankStageSummary(mode);
+    renderStages(stageSummary, true);
     const budget = requestBudget();
     chrome.storage.local.set({ requestBudget: budget });
     const selectedOrigin = new URL(tab.url).origin;
@@ -849,13 +1006,19 @@ async function runScan() {
     });
 
     showTarget(tab.url, tab.favIconUrl || "");
+    stageSummary.headers = "running";
+    stageSummary.passive = "running";
+    renderStages(stageSummary, true);
     setProgress("passive scan...");
     let headerFindings = [];
     if (headersAreCurrent) {
       headerFindings = analyzeHeaders(capturedHeaders.headers || [], tab.url);
+      stageSummary.headers = "complete";
     } else {
       headerResults.innerHTML = '<div class="empty-hint">Headers were not captured for this page load. Refresh the target tab, then scan again to include them.</div>';
+      stageSummary.headers = "unavailable";
     }
+    renderStages(stageSummary, true);
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: function (scanId, scanMode) {
@@ -870,22 +1033,35 @@ async function runScan() {
     });
 
     const passive = await waitForScanResult(activeScanId, tab.url);
+    stageSummary.passive = "complete";
+    renderStages(stageSummary, true);
     let activeFindings = [];
     let requestSummary = { mode: mode, budget: mode === "passive" ? 0 : budget, attempted: 0, completed: 0, stoppedReason: null };
     let requestEntries = [];
     if (scanCancelled) throw new Error("Scan cancelled");
     if (mode !== "passive") {
-      setProgress(mode === "lab" ? "safe probes + controlled path discovery..." : "safe active probes...");
+      setProgress(mode === "full" ? "running Safe Active, then Lab..." : mode === "lab" ? "controlled path discovery..." : "safe active probes...");
       currentRequestController = VulnscanRequests.create({
-        mode: mode,
+        mode: mode === "safe" ? "safe" : "lab",
         origin: selectedOrigin,
         budget: budget,
         fetchFn: fetch,
         onLog: function (entry, entries, summary) { renderRequestLog(entries, summary); }
       });
-      activeFindings = await runActiveChecks(tab.url, activeScanId, currentRequestController, { mode: mode, budget: budget });
+      activeFindings = await runActiveChecks(tab.url, activeScanId, currentRequestController, {
+        mode: mode,
+        budget: budget,
+        includeSafe: mode === "safe" || mode === "full",
+        includeLab: mode === "lab" || mode === "full",
+        onStage: function (stage, state) {
+          stageSummary[stage] = state;
+          renderStages(stageSummary, true);
+          if (state === "running") setProgress(stage === "safe" ? "safe active checks..." : "soft-404-aware path discovery...");
+        }
+      });
       requestEntries = currentRequestController.getLog();
       requestSummary = currentRequestController.getSummary();
+      requestSummary.mode = mode;
     }
     await new Promise(function (resolve) {
       chrome.runtime.sendMessage({
@@ -898,7 +1074,7 @@ async function runScan() {
 
     const findings = VulnscanFindings.dedupe((passive.findings || []).concat(headerFindings, activeFindings));
     const scan = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       scanId: activeScanId,
       scanMode: mode,
       url: redactUrl(tab.url),
@@ -907,7 +1083,8 @@ async function runScan() {
       summary: VulnscanFindings.summarize(findings),
       risk: VulnscanFindings.risk(findings),
       timestamp: Date.now(),
-      requestSummary: requestSummary
+      requestSummary: requestSummary,
+      stageSummary: stageSummary
     };
     chrome.storage.local.set({ lastScan: scan });
     saveToHistory(scan);
@@ -926,6 +1103,8 @@ async function runScan() {
     scanning = false;
     scanBtn.disabled = false;
     scanModeEl.disabled = false;
+    if (scanModePicker) scanModePicker.classList.remove("disabled");
+    if (fullScanToggle) fullScanToggle.disabled = false;
     requestBudgetEl.disabled = false;
     cancelScanBtn.hidden = true;
     currentRequestController = null;
@@ -983,30 +1162,36 @@ function buildMarkdownReport(scan) {
   markdown += "**Mode:** " + scan.scanMode + "\n\n";
   markdown += "**Risk:** " + scan.risk + "\n\n";
   markdown += "**Time:** " + new Date(scan.timestamp).toISOString() + "\n\n";
+  markdown += "**Stages:** " + ["passive", "headers", "safe", "lab"].map(function (stage) {
+    return categoryLabel(stage) + " " + ((scan.stageSummary && scan.stageSummary[stage]) || "unknown");
+  }).join(" · ") + "\n\n";
   markdown += "## Findings\n\n";
   if (!findings.length) markdown += "No actionable findings.\n";
-  findings.forEach(function (finding) {
-    markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
-    markdown += "  - Confidence: " + finding.confidence + "\n";
-    markdown += "  - Evidence: " + finding.evidence + "\n";
-    markdown += "  - Verify: " + finding.verification + "\n";
-  });
+  function appendGroups(items) {
+    const categories = Array.from(new Set(items.map(function (finding) { return finding.category; }))).sort();
+    categories.forEach(function (category) {
+      markdown += "\n### " + categoryLabel(category) + "\n\n";
+      items.filter(function (finding) { return finding.category === category; }).forEach(function (finding) {
+        markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
+        markdown += "  - Confidence: " + finding.confidence + "\n";
+        markdown += "  - Stage: " + sourceLabel(finding.source) + "\n";
+        markdown += "  - Evidence: " + finding.evidence + "\n";
+        markdown += "  - Verify: " + finding.verification + "\n";
+      });
+    });
+  }
+  appendGroups(findings);
   markdown += "\n## Review\n\n";
   if (!review.length) markdown += "No additional review items.\n";
-  review.forEach(function (finding) {
-    markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
-    markdown += "  - Confidence: " + finding.confidence + "\n";
-    markdown += "  - Evidence: " + finding.evidence + "\n";
-    markdown += "  - Verify: " + finding.verification + "\n";
-  });
+  appendGroups(review);
   markdown += "\n> Secret values are redacted. Use the separate full-secret export only when you need the raw values.\n";
   return markdown;
 }
 
 function buildJsonReport(scan) {
   return {
-    reportVersion: "3.0",
-    schemaVersion: 3,
+    reportVersion: "4.0",
+    schemaVersion: 4,
     url: scan.url,
     scanId: scan.scanId,
     scanMode: scan.scanMode,
@@ -1014,6 +1199,7 @@ function buildJsonReport(scan) {
     risk: scan.risk,
     summary: scan.summary,
     requestSummary: scan.requestSummary,
+    stageSummary: scan.stageSummary,
     secretsRedacted: true,
     findings: scan.findings.map(exportFinding)
   };
@@ -1097,6 +1283,57 @@ document.querySelectorAll(".filter").forEach(function (button) {
   });
 });
 
+document.querySelectorAll("input[name='scanModeChoice']").forEach(function (input) {
+  input.addEventListener("change", function () {
+    if (!input.checked || scanning) return;
+    if (fullScanToggle) fullScanToggle.checked = false;
+    scanModeEl.value = input.value;
+    updateModeHelp();
+    if (scanModePicker) scanModePicker.open = false;
+  });
+});
+
+if (fullScanToggle) {
+  fullScanToggle.addEventListener("change", function () {
+    if (scanning) return;
+    if (fullScanToggle.checked) {
+      scanModeEl.value = "full";
+    } else {
+      const selected = Array.from(document.querySelectorAll("input[name='scanModeChoice']")).find(function (input) {
+        return input.checked;
+      });
+      scanModeEl.value = selected ? selected.value : "passive";
+    }
+    updateModeHelp();
+    if (scanModePicker) scanModePicker.open = false;
+  });
+}
+
+if (resultSearchEl) {
+  resultSearchEl.addEventListener("input", function () {
+    currentSearch = resultSearchEl.value.trim().toLowerCase();
+    applyFilter();
+  });
+}
+if (categoryFilterEl) {
+  categoryFilterEl.addEventListener("change", function () {
+    currentCategory = categoryFilterEl.value || "all";
+    applyFilter();
+  });
+}
+if (confidenceFilterEl) {
+  confidenceFilterEl.addEventListener("change", function () {
+    currentConfidence = confidenceFilterEl.value || "all";
+    applyFilter();
+  });
+}
+if (sourceFilterEl) {
+  sourceFilterEl.addEventListener("change", function () {
+    currentSource = sourceFilterEl.value || "all";
+    applyFilter();
+  });
+}
+
 scanBtn.addEventListener("click", runScan);
 clearBtn.addEventListener("click", clearResults);
 cancelScanBtn.addEventListener("click", function () {
@@ -1156,6 +1393,14 @@ if (toggleHeadersBtn) {
   });
 }
 
+if (toggleRequestLogBtn) {
+  toggleRequestLogBtn.addEventListener("click", function () {
+    const hidden = requestLogEl.style.display === "none";
+    requestLogEl.style.display = hidden ? "block" : "none";
+    toggleRequestLogBtn.textContent = hidden ? "hide" : "show";
+  });
+}
+
 document.addEventListener("keydown", function (event) {
   if (event.target.tagName === "INPUT" || event.target.tagName === "TEXTAREA") return;
   const key = event.key.toLowerCase();
@@ -1168,7 +1413,7 @@ chrome.storage.local.get("lastScan", function (data) {
   if (!data.lastScan) return;
   if (!renderFindings(data.lastScan)) {
     chrome.storage.local.remove("lastScan", function () {
-      setStatus("// v5.3 needs a fresh scan — incompatible cached results were cleared");
+      setStatus("// v5.4 needs a fresh scan — incompatible cached results were cleared");
     });
   }
 });

@@ -20,7 +20,10 @@ function scan(options) {
     documentElement: { innerHTML: html },
     cookie: settings.cookie || "",
     scripts: scripts,
-    querySelectorAll: function () { return []; }
+    querySelectorAll: function (selector) {
+      if (settings.nodes && settings.nodes[selector]) return settings.nodes[selector];
+      return [];
+    }
   };
   const pageUrl = new URL(settings.url || "https://example.test/page");
   const context = {
@@ -32,6 +35,8 @@ function scan(options) {
     },
     chrome: { runtime: { sendMessage: function (message) { messages.push(message); } } },
     URL: URL,
+    localStorage: settings.localStorage,
+    sessionStorage: settings.sessionStorage,
     __vulnscanScanId: "scan-1",
     __vulnscanScanMode: settings.mode || "passive"
   };
@@ -61,7 +66,7 @@ test("exports every distinct secret while keeping one redacted type finding", fu
   assert.equal(vault.secrets.length, 2);
   assert.equal(new Set(vault.secrets).size, 2);
   assert.equal(vault.scanId, "scan-1");
-  assert.equal(result(messages).schemaVersion, 3);
+  assert.equal(result(messages).schemaVersion, 4);
   assert.equal(result(messages).scanMode, "passive");
 });
 
@@ -117,4 +122,43 @@ test("separates raw sinks from a source-to-sink flow", function () {
   assert.equal(unrelated.findings.some(function (finding) {
     return finding.checkId === "dom.source-to-sink";
   }), false);
+});
+
+test("builds passive intelligence without reading values", function () {
+  const storageValue = "storage-value-must-not-leak";
+  let valueReads = 0;
+  const storage = {
+    length: 2,
+    key: function (index) { return ["theme", "session_state"][index]; },
+    getItem: function () { valueReads++; return storageValue; }
+  };
+  const form = {
+    tagName: "FORM",
+    method: "post",
+    action: "https://example.test/account/save?return=private",
+    querySelector: function (selector) {
+      if (selector === "input[type='password']") return {};
+      return null;
+    },
+    querySelectorAll: function () { return [{ name: "email" }, { name: "password" }]; }
+  };
+  const link = { tagName: "A", href: "https://example.test/settings?tab=security" };
+  const script = { tagName: "SCRIPT", src: "https://cdn.example.net/app.js" };
+  const frame = { tagName: "IFRAME", src: "https://login.example.net/embed" };
+  const messages = scan({
+    cookie: "session_id=hidden-value",
+    localStorage: storage,
+    sessionStorage: { length: 0, key: function () { return null; }, getItem: function () { valueReads++; return storageValue; } },
+    nodes: {
+      "form": [form],
+      "a[href], form[action], script[src], link[href], iframe[src]": [link, form, script, frame]
+    }
+  });
+  const findings = result(messages).findings;
+  ["inventory.endpoints", "inventory.parameters", "inventory.forms", "inventory.resources", "inventory.storage-names", "inventory.authentication"].forEach(function (checkId) {
+    assert.equal(findings.some(function (finding) { return finding.checkId === checkId; }), true, checkId);
+  });
+  assert.equal(valueReads, 0);
+  assert.doesNotMatch(JSON.stringify(messages), new RegExp(storageValue));
+  assert.doesNotMatch(JSON.stringify(result(messages)), /hidden-value/);
 });

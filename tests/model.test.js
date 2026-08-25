@@ -57,4 +57,3 @@ test("keeps distinct details and derives risk from findings only", function () {
   });
   assert.equal(model.risk([review, finding]), "high");
 });
-

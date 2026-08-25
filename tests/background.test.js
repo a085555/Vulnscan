@@ -140,9 +140,27 @@ test("never copies unknown secret fields into local scan storage", async functio
     }]
   });
   assert.equal(JSON.stringify(worker.state.local).includes("raw-value"), false);
-  assert.equal(worker.state.local.lastScan.schemaVersion, 3);
+  assert.equal(worker.state.local.lastScan.schemaVersion, 4);
   assert.equal(worker.state.local.lastScan.scanId, "scan-1");
   assert.match(worker.state.local.lastScan.url, /token=%5Bredacted%5D/);
+});
+
+test("stores Full Scan mode and sanitized stage state", async function () {
+  const worker = createWorker();
+  await worker.send({
+    type: "scan_results",
+    schemaVersion: 4,
+    scanId: "scan-full",
+    scanMode: "full",
+    url: "https://example.test/",
+    findings: [],
+    stageSummary: { passive: "complete", headers: "complete", safe: "running", lab: "invalid", raw: "do-not-copy" }
+  });
+  const stored = worker.state.local.lastScan;
+  assert.equal(stored.scanMode, "full");
+  assert.equal(stored.stageSummary.safe, "running");
+  assert.equal(stored.stageSummary.lab, "pending");
+  assert.equal(JSON.stringify(stored).includes("do-not-copy"), false);
 });
 
 test("removes incompatible cached scans during an extension update", function () {
@@ -181,9 +199,9 @@ test("migrates v2 scans and history without copying unknown fields", function ()
   };
   const worker = createWorker(shared);
   worker.listeners.installed({ reason: "update" });
-  assert.equal(shared.local.lastScan.schemaVersion, 3);
+  assert.equal(shared.local.lastScan.schemaVersion, 4);
   assert.equal(shared.local.lastScan.scanMode, "legacy");
-  assert.equal(shared.local.scanHistory[0].schemaVersion, 3);
+  assert.equal(shared.local.scanHistory[0].schemaVersion, 4);
   assert.equal(JSON.stringify(shared.local).includes("do-not-copy"), false);
 });
 

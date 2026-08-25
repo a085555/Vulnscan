@@ -57,7 +57,7 @@ function clearSessionData(callback) {
 
 function cleanRequestSummary(summary, fallbackMode) {
   const source = summary && typeof summary === "object" ? summary : {};
-  const mode = ["passive", "safe", "lab", "legacy"].includes(source.mode) ? source.mode : fallbackMode;
+  const mode = ["passive", "safe", "lab", "full", "legacy"].includes(source.mode) ? source.mode : fallbackMode;
   return {
     mode: mode,
     budget: Math.max(0, Math.min(50, Number(source.budget) || 0)),
@@ -67,12 +67,27 @@ function cleanRequestSummary(summary, fallbackMode) {
   };
 }
 
+function cleanStageSummary(summary, mode) {
+  const source = summary && typeof summary === "object" ? summary : {};
+  const allowed = ["pending", "running", "complete", "skipped", "stopped", "unavailable"];
+  const active = {
+    passive: "complete",
+    headers: "unavailable",
+    safe: mode === "safe" || mode === "full" ? "pending" : "skipped",
+    lab: mode === "lab" || mode === "full" ? "pending" : "skipped"
+  };
+  Object.keys(active).forEach(function (stage) {
+    if (allowed.includes(source[stage])) active[stage] = source[stage];
+  });
+  return active;
+}
+
 function migrateScan(scan) {
-  if (!scan || !scan.url || !scan.urlFingerprint || (scan.schemaVersion !== 2 && scan.schemaVersion !== 3)) return null;
+  if (!scan || !scan.url || !scan.urlFingerprint || ![2, 3, 4].includes(scan.schemaVersion)) return null;
   const findings = VulnscanFindings.dedupe(scan.findings || []);
-  const mode = ["passive", "safe", "lab"].includes(scan.scanMode) ? scan.scanMode : "legacy";
+  const mode = ["passive", "safe", "lab", "full"].includes(scan.scanMode) ? scan.scanMode : "legacy";
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     scanId: scan.scanId || null,
     scanMode: mode,
     url: redactUrl(scan.url),
@@ -81,14 +96,15 @@ function migrateScan(scan) {
     timestamp: scan.timestamp || Date.now(),
     summary: VulnscanFindings.summarize(findings),
     risk: VulnscanFindings.risk(findings),
-    requestSummary: cleanRequestSummary(scan.requestSummary, mode)
+    requestSummary: cleanRequestSummary(scan.requestSummary, mode),
+    stageSummary: cleanStageSummary(scan.stageSummary, mode)
   };
 }
 
 function cleanRequestEntries(entries) {
   return (entries || []).slice(0, 50).map(function (entry) {
     return {
-      method: ["GET", "HEAD", "OPTIONS", "POST"].includes(entry.method) ? entry.method : "GET",
+      method: ["GET", "HEAD", "OPTIONS"].includes(entry.method) ? entry.method : "GET",
       url: redactUrl(entry.url),
       status: Number.isInteger(entry.status) ? entry.status : 0,
       durationMs: Number.isFinite(entry.durationMs) ? Math.max(0, Math.round(entry.durationMs)) : 0,
@@ -171,9 +187,9 @@ chrome.runtime.onInstalled.addListener(function () {
 
     if (Array.isArray(data.scanHistory)) {
       const history = data.scanHistory.map(function (entry) {
-        const mode = ["passive", "safe", "lab"].includes(entry.scanMode) ? entry.scanMode : "legacy";
+        const mode = ["passive", "safe", "lab", "full"].includes(entry.scanMode) ? entry.scanMode : "legacy";
         return {
-          schemaVersion: 3,
+          schemaVersion: 4,
           url: redactUrl(entry.url),
           risk: entry.risk || "legacy",
           timestamp: entry.timestamp || Date.now(),
@@ -188,7 +204,8 @@ chrome.runtime.onInstalled.addListener(function () {
           findingsCount: Number.isInteger(entry.findingsCount) ? entry.findingsCount : 0,
           reviewCount: Number.isInteger(entry.reviewCount) ? entry.reviewCount : 0,
           scanMode: mode,
-          requestSummary: entry.requestSummary ? cleanRequestSummary(entry.requestSummary, mode) : null
+          requestSummary: entry.requestSummary ? cleanRequestSummary(entry.requestSummary, mode) : null,
+          stageSummary: cleanStageSummary(entry.stageSummary, mode)
         };
       }).slice(0, 12);
       chrome.storage.local.set({ scanHistory: history });
@@ -207,15 +224,16 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     const summary = VulnscanFindings.summarize(findings);
     chrome.storage.local.set({
       lastScan: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         scanId: message.scanId || null,
-        scanMode: ["passive", "safe", "lab"].includes(message.scanMode) ? message.scanMode : "passive",
+        scanMode: ["passive", "safe", "lab", "full"].includes(message.scanMode) ? message.scanMode : "passive",
         url: redactUrl(message.url),
         urlFingerprint: urlFingerprint(message.url),
         findings: findings,
         timestamp: Date.now(),
         summary: summary,
-        risk: VulnscanFindings.risk(findings)
+        risk: VulnscanFindings.risk(findings),
+        stageSummary: cleanStageSummary(message.stageSummary, message.scanMode)
       }
     }, function () {
       sendResponse({ ok: true });

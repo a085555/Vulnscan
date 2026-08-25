@@ -5,7 +5,7 @@
   const allowedMethods = {
     passive: new Set(),
     safe: new Set(["GET", "HEAD", "OPTIONS"]),
-    lab: new Set(["GET", "HEAD", "OPTIONS", "POST"])
+    lab: new Set(["GET", "HEAD", "OPTIONS"])
   };
 
   function clampBudget(value) {
@@ -107,7 +107,8 @@
     }
 
     function canRequest() {
-      return !stoppedReason && attempted < budget;
+      if (!stoppedReason && attempted >= budget) stoppedReason = "budget-exhausted";
+      return !stoppedReason;
     }
 
     async function request(value, init) {

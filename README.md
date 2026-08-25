@@ -2,16 +2,18 @@
 
 Chrome extension (Manifest V3) for controlled passive and safe-active webpage checks.
 
-**Tool by a085** · v5.3.0
+**Tool by a085** · v5.4.0
 
 ## Features
 
 - Findings and lower-confidence Review clues kept separate
 - Confidence, evidence, and manual verification guidance for every result
 - Passive checks: DOM flows, secrets, forms, mixed content, and source hints
+- Passive route, parameter, form, resource, storage-name, and authentication-surface inventory
 - Header and cookie flag analysis (`extraHeaders`)
 - Inline-script source→sink heuristic for DOM XSS candidates
-- Passive, Safe Active, and Lab scan modes
+- Passive, Safe Active, Lab, and staged Full Scan modes
+- Full Scan runs every stage once under one shared request budget
 - Exact-origin request controller with a configurable 5–50 request budget
 - Reflected-input clues and scan-scoped open-redirect confirmation in active modes
 - Soft-404-aware path discovery in Lab mode
@@ -20,7 +22,8 @@ Chrome extension (Manifest V3) for controlled passive and safe-active webpage ch
 - Secrets hidden in the UI; distinct full values remain exportable from memory-only session storage
 - Optional host permissions (asked when you scan a site)
 - Separate redacted Markdown, redacted JSON, and confirmed full-secret exports
-- Dashboard with tab picker, summary history, installed version, update link, and local-data controls
+- Grouped results with overview counts, search, category, confidence, severity, and stage filters
+- Dashboard with stage progress, tab picker, summary history, update link, and local-data controls
 
 ## Install
 
@@ -35,7 +38,7 @@ Chrome extension (Manifest V3) for controlled passive and safe-active webpage ch
 2. Open Vulnscan, pick the tab
 3. Choose a mode and request budget
 4. Scan Selected Tab (Chrome may ask for site permission)
-5. Confirm authorization when using Safe Active or Lab
+5. Confirm authorization when using Safe Active, Lab, or Full Scan
 6. Review Findings and Review clues, then export if needed
 
 Shortcuts: `S` scan · `C` clear · `E` Markdown export
@@ -44,7 +47,8 @@ Shortcuts: `S` scan · `C` clear · `E` Markdown export
 
 - **Passive** is the default. It analyzes the loaded DOM and captured response headers without sending scanner-generated network requests or reloading the target.
 - **Safe Active** adds same-origin GET, HEAD, and OPTIONS checks for reflection, redirects, and `robots.txt` metadata.
-- **Lab** adds budgeted common-path discovery with soft-404 filtering. It is intended for controlled test environments and explicitly authorized targets.
+- **Lab** runs budgeted common-path discovery with soft-404 filtering. It is intended for controlled test environments and explicitly authorized targets.
+- **Full Scan** runs Passive, Safe Active, and Lab sequentially. It shares one request budget and does not repeat Safe Active probes inside the Lab stage.
 
 Active scans show their exact origin, methods, planned request count, and budget before starting. Requests omit credentials, do not follow redirects, and stop when the budget or a safety threshold is reached.
 

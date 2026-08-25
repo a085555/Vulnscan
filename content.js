@@ -41,6 +41,149 @@
     }
   }
 
+  function safeName(value) {
+    const name = String(value || "").trim();
+    if (!name || name.length > 60 || !/^[A-Za-z][A-Za-z0-9_.:\[\]-]*$/.test(name)) return "";
+    if (/[A-Za-z0-9_-]{28,}/.test(name)) return "[long name hidden]";
+    return name;
+  }
+
+  function unique(values, limit) {
+    return Array.from(new Set(values.filter(Boolean))).slice(0, limit);
+  }
+
+  function readStorageNames(storage) {
+    const names = [];
+    try {
+      for (let i = 0; i < storage.length; i++) names.push(safeName(storage.key(i)));
+    } catch (e) {}
+    return unique(names, 20);
+  }
+
+  function addPassiveInventory() {
+    const endpoints = [];
+    const parameterNames = [];
+    const thirdPartyHosts = [];
+    let scriptCount = 0;
+    let styleCount = 0;
+    let frameCount = 0;
+
+    try {
+      const current = new URL(pageUrl);
+      current.searchParams.forEach(function (value, name) { parameterNames.push(safeName(name)); });
+      document.querySelectorAll("a[href], form[action], script[src], link[href], iframe[src]").forEach(function (element) {
+        const value = element.href || element.action || element.src;
+        if (!value) return;
+        let target;
+        try { target = new URL(value, pageUrl); } catch (e) { return; }
+        if (!/^https?:$/.test(target.protocol)) return;
+        target.searchParams.forEach(function (value, name) { parameterNames.push(safeName(name)); });
+        if (target.origin === current.origin) endpoints.push(redactUrl(target.href));
+        else thirdPartyHosts.push(target.hostname);
+        const tag = String(element.tagName || "").toLowerCase();
+        if (tag === "script") scriptCount++;
+        if (tag === "link" && String(element.rel || "").toLowerCase().includes("stylesheet")) styleCount++;
+        if (tag === "iframe") frameCount++;
+      });
+    } catch (e) {}
+
+    const forms = Array.from(document.querySelectorAll("form"));
+    let postForms = 0;
+    let passwordForms = 0;
+    let fileForms = 0;
+    forms.forEach(function (form) {
+      if (String(form.method || "get").toLowerCase() === "post") postForms++;
+      try {
+        if (form.querySelector("input[type='password']")) passwordForms++;
+        if (form.querySelector("input[type='file']")) fileForms++;
+        form.querySelectorAll("input[name], select[name], textarea[name], button[name]").forEach(function (field) {
+          parameterNames.push(safeName(field.name));
+        });
+      } catch (e) {}
+    });
+
+    const endpointList = unique(endpoints, 16);
+    if (endpointList.length) {
+      add("info", "Same-origin route inventory", endpointList.length + " unique route(s) mapped", {
+        checkId: "inventory.endpoints",
+        confidence: "high",
+        bucket: "review",
+        category: "inventory",
+        evidence: "Routes: " + endpointList.join(", ") + ". Query values are hidden.",
+        verification: "Review the routes as a coverage map and confirm which ones are intended to be public.",
+        occurrences: endpointList.length
+      });
+    }
+
+    const parameters = unique(parameterNames, 24);
+    if (parameters.length) {
+      add("info", "Parameter and field names", parameters.join(", "), {
+        checkId: "inventory.parameters",
+        confidence: "high",
+        bucket: "review",
+        category: "inventory",
+        evidence: parameters.length + " unique query or form field name(s) were observed. Values were not collected.",
+        verification: "Use the names to check validation, authorization, and server-side handling on approved targets.",
+        occurrences: parameters.length
+      });
+    }
+
+    if (forms.length) {
+      add("info", "Form surface map", forms.length + " form(s): " + postForms + " POST, " + passwordForms + " password, " + fileForms + " file upload", {
+        checkId: "inventory.forms",
+        confidence: "high",
+        bucket: "review",
+        category: "inventory",
+        evidence: "Only form methods and field types were counted; field values were not read.",
+        verification: "Review sensitive forms for access control, anti-CSRF handling, validation, and secure transport.",
+        occurrences: forms.length
+      });
+    }
+
+    const thirdParties = unique(thirdPartyHosts, 12);
+    if (scriptCount || styleCount || frameCount || thirdParties.length) {
+      add("info", "Loaded resource map", scriptCount + " script(s), " + styleCount + " stylesheet(s), " + frameCount + " frame(s), " + thirdParties.length + " third-party host(s)", {
+        checkId: "inventory.resources",
+        confidence: "high",
+        bucket: "review",
+        category: "inventory",
+        evidence: thirdParties.length ? "Third-party hosts: " + thirdParties.join(", ") : "No third-party hosts were observed in the mapped elements.",
+        verification: "Confirm each external dependency and embedded origin is expected and still required.",
+        occurrences: scriptCount + styleCount + frameCount
+      });
+    }
+
+    const localNames = typeof localStorage === "undefined" ? [] : readStorageNames(localStorage);
+    const sessionNames = typeof sessionStorage === "undefined" ? [] : readStorageNames(sessionStorage);
+    if (localNames.length || sessionNames.length) {
+      add("info", "Browser storage names", "localStorage: " + (localNames.join(", ") || "none") + "; sessionStorage: " + (sessionNames.join(", ") || "none"), {
+        checkId: "inventory.storage-names",
+        confidence: "high",
+        bucket: "review",
+        category: "inventory",
+        evidence: "Storage key names were read. Storage values were never accessed.",
+        verification: "Review whether the named entries are necessary and whether sensitive state is stored in the browser.",
+        occurrences: localNames.length + sessionNames.length
+      });
+    }
+
+    const authCookies = document.cookie ? unique(document.cookie.split(";").map(function (cookie) {
+      const name = safeName(cookie.trim().split("=")[0]);
+      return /auth|session|token|login|sid/i.test(name) ? name : "";
+    }), 12) : [];
+    if (passwordForms || authCookies.length) {
+      add("info", "Authentication surface clues", passwordForms + " password form(s), " + authCookies.length + " authentication-style cookie name(s)", {
+        checkId: "inventory.authentication",
+        confidence: "medium",
+        bucket: "review",
+        category: "authentication",
+        evidence: authCookies.length ? "Cookie names: " + authCookies.join(", ") + ". Cookie values were not collected." : "Password fields were observed; no cookie values were collected.",
+        verification: "Review login, recovery, session rotation, logout, and reauthentication behavior manually.",
+        occurrences: passwordForms + authCookies.length
+      });
+    }
+  }
+
   const sinks = [
     "innerHTML", "outerHTML", "document.write", "document.writeln", "eval(",
     "Function(", "setTimeout(", "setInterval(", "location.href",
@@ -143,6 +286,8 @@
       }
     } catch (e) {}
   });
+
+  addPassiveInventory();
 
   document.querySelectorAll("img, script, link, iframe, source, video, audio, embed, object").forEach(function (element) {
     const source = element.src || element.href || element.data;
@@ -394,7 +539,7 @@
   const normalizedFindings = VulnscanFindings.dedupe(findings);
   chrome.runtime.sendMessage({
     type: "scan_results",
-    schemaVersion: 3,
+    schemaVersion: 4,
     scanId: scanId,
     scanMode: scanMode,
     url: pageUrl,

@@ -14,7 +14,7 @@
         <div class="logo">◈</div>
         <div>
           <div class="brand-name">VULN<span>SCAN</span></div>
-          <div id="brandVersion" class="brand-ver">v5.3.0</div>
+          <div id="brandVersion" class="brand-ver">v5.4.0</div>
           <div class="brand-by">tool by a085</div>
         </div>
       </div>
@@ -65,13 +65,36 @@
       </header>
 
       <div class="scan-controls">
-        <label>MODE
-          <select id="scanMode" class="control-select">
+        <div class="control-field">
+          <span class="control-label">MODE</span>
+          <details id="scanModePicker" class="mode-picker">
+            <summary id="scanModeSummary">Passive</summary>
+            <div class="mode-menu">
+              <label class="mode-option">
+                <input type="radio" name="scanModeChoice" value="passive" checked>
+                <span><strong>Passive</strong><small>Inspect the loaded page only</small></span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="scanModeChoice" value="safe">
+                <span><strong>Safe Active</strong><small>Reflection, redirect, and robots checks</small></span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="scanModeChoice" value="lab">
+                <span><strong>Lab</strong><small>Soft-404-aware path discovery</small></span>
+              </label>
+              <label class="mode-option full-scan-option">
+                <input id="fullScanToggle" type="checkbox">
+                <span><strong>Full Scan</strong><small>Run Passive, Safe Active, and Lab in stages</small></span>
+              </label>
+            </div>
+          </details>
+          <select id="scanMode" hidden aria-hidden="true" tabindex="-1">
             <option value="passive" selected>Passive</option>
             <option value="safe">Safe Active</option>
             <option value="lab">Lab</option>
+            <option value="full">Full Scan</option>
           </select>
-        </label>
+        </div>
         <label>REQUEST BUDGET
           <input id="requestBudget" type="number" min="5" max="50" value="20">
         </label>
@@ -81,6 +104,12 @@
       <!-- Status / progress -->
       <div id="statusBar" class="status-bar">// ready — open a website tab, then hit Scan</div>
       <div id="progress" class="progress" style="display:none;"></div>
+      <div id="stageProgress" class="stage-progress" hidden>
+        <div class="scan-stage" data-stage="passive"><span>1</span>Passive</div>
+        <div class="scan-stage" data-stage="headers"><span>2</span>Headers</div>
+        <div class="scan-stage" data-stage="safe"><span>3</span>Safe Active</div>
+        <div class="scan-stage" data-stage="lab"><span>4</span>Lab</div>
+      </div>
 
       <!-- SCAN VIEW -->
       <section id="view-scan" class="view active">
@@ -107,6 +136,8 @@
           </div>
         </div>
 
+        <div id="resultOverview" class="result-overview" hidden></div>
+
         <div class="content-grid">
           <div class="panel">
             <div class="panel-head">
@@ -132,6 +163,25 @@
                 <button class="filter" data-sev="info">INFO</button>
               </div>
             </div>
+            <div class="result-tools">
+              <input id="resultSearch" type="search" placeholder="Search results" aria-label="Search results">
+              <select id="categoryFilter" aria-label="Filter by category">
+                <option value="all">All categories</option>
+              </select>
+              <select id="confidenceFilter" aria-label="Filter by confidence">
+                <option value="all">All confidence</option>
+                <option value="high">High confidence</option>
+                <option value="medium">Medium confidence</option>
+                <option value="low">Low confidence</option>
+              </select>
+              <select id="sourceFilter" aria-label="Filter by scan stage">
+                <option value="all">All stages</option>
+                <option value="passive">Passive</option>
+                <option value="headers">Headers</option>
+                <option value="safe-active">Safe Active</option>
+                <option value="lab">Lab</option>
+              </select>
+            </div>
             <div id="results" class="panel-body findings-body">
               <div class="empty-hint">No findings yet</div>
             </div>
@@ -141,7 +191,10 @@
         <div class="panel request-panel">
           <div class="panel-head">
             <span>// REQUEST LOG</span>
-            <span id="requestSummary" class="panel-note">Passive mode — no requests</span>
+            <div class="panel-head-actions">
+              <span id="requestSummary" class="panel-note">Passive mode — no requests</span>
+              <button id="toggleRequestLog" class="btn-mini">hide</button>
+            </div>
           </div>
           <div id="requestLog" class="panel-body request-log">
             <div class="empty-hint">No scanner-generated requests</div>
@@ -167,11 +220,12 @@
         <div class="panel about-panel">
           <div class="panel-head"><span>// ABOUT</span></div>
           <div class="panel-body about-body">
-            <p><strong>VulnScan Ultimate</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v5.3.0</strong>.</p>
+            <p><strong>VulnScan Ultimate</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v5.4.0</strong>.</p>
             <ul>
               <li><strong>Passive</strong> inspects the loaded page without sending scanner-generated requests.</li>
               <li><strong>Safe Active</strong> allows same-origin GET, HEAD, and OPTIONS checks within a request budget.</li>
-              <li><strong>Lab</strong> adds controlled path discovery for targets you are explicitly authorized to test.</li>
+              <li><strong>Lab</strong> performs controlled, soft-404-aware path discovery.</li>
+              <li><strong>Full Scan</strong> runs Passive, Safe Active, and Lab in order under one shared request budget.</li>
             </ul>
             <p class="muted">Site access is requested for the exact selected origin so the extension can inspect that tab. Scan reports and history are stored locally. Raw secret values stay in browser session memory and only leave it through the separate full-secret export.</p>
             <div class="about-actions">

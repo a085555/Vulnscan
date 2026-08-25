@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vuln Scanner Ultimate",
-  "version": "5.3.0",
+  "version": "5.4.0",
   "minimum_chrome_version": "102",
   "description": "Controlled passive and safe-active webpage security checks. Tool by a085.",
   "permissions": [
