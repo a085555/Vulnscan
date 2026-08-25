@@ -1,29 +1,28 @@
-# VulnScan Ultimate
+# Vulnscan
 
-Browser extension (Chrome MV3) for passive + light-active page checks.
+Chrome extension (Manifest V3) for passive and light-active webpage security checks.
 
-Built by a085.
+**Tool by a085**
+
+## Features
+- Passive checks — DOM sinks, secrets, CSRF clues, mixed content, ...
+- Header analysis — CSP, HSTS, X-Frame-Options, ...
+- Cookie flags — Secure, HttpOnly, SameSite
+- Light active probes — reflection, open-redirect, CORS
+- Path discovery — common paths, noise-filtered
+- Dashboard UI — tab picker, history, filters, export
 
 ## Install
+1. Clone/download
+2. chrome://extensions → Developer mode
+3. Load unpacked → select folder
+4. Click the icon for the dashboard
 
-1. Open `chrome://extensions`
-2. Enable Developer mode
-3. Load unpacked → select this folder
-4. Click the extension icon to open the dashboard
+## Usage
+Pick a tab → Scan Selected Tab → review / export  
+Shortcuts: S scan · C clear · E export
 
-## What it does
+## Notes
+Authorized testing only. MIT license.
 
-- DOM sink / secret pattern checks
-- Security headers + cookie flags
-- Light reflection / open-redirect / CORS probes
-- Common path probes
-- Export report (markdown / json)
-
-Only use on targets you own or have permission to test.
-
-## Files
-
-- `manifest.json` – extension config
-- `background.js` – service worker, tab helpers, header cache
-- `content.js` – injected page checks
-- `dashboard.html` / `dashboard.css` / `dashboard.js` – main UI
+Built by a085
