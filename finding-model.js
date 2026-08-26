@@ -85,11 +85,43 @@
     return "info";
   }
 
+  function compare(currentFindings, previousFindings) {
+    const current = dedupe(currentFindings);
+    const previous = dedupe(previousFindings);
+    const currentByFingerprint = new Map(current.map(function (finding) {
+      return [finding.fingerprint, finding];
+    }));
+    const previousByFingerprint = new Map(previous.map(function (finding) {
+      return [finding.fingerprint, finding];
+    }));
+    const result = { new: [], resolved: [], changed: [], unchanged: [] };
+
+    current.forEach(function (finding) {
+      const old = previousByFingerprint.get(finding.fingerprint);
+      if (!old) {
+        result.new.push(finding);
+        return;
+      }
+      const changed = finding.severity !== old.severity ||
+        finding.confidence !== old.confidence ||
+        finding.bucket !== old.bucket ||
+        finding.occurrences !== old.occurrences;
+      if (changed) result.changed.push({ current: finding, previous: old });
+      else result.unchanged.push(finding);
+    });
+
+    previous.forEach(function (finding) {
+      if (!currentByFingerprint.has(finding.fingerprint)) result.resolved.push(finding);
+    });
+    return result;
+  }
+
   root.VulnscanFindings = {
     normalize: normalize,
     dedupe: dedupe,
     summarize: summarize,
     risk: risk,
+    compare: compare,
     fingerprint: fingerprint,
     key: function (value) { return "vk-" + hash(clean(value)); }
   };

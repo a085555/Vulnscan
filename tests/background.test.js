@@ -5,6 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
 const backgroundSource = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
 
 function createWorker(shared) {
@@ -59,6 +60,7 @@ function createWorker(shared) {
   const context = { chrome: chrome, URL: URL, Date: Date, importScripts: function () {} };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
+  vm.runInContext(checkSource, context);
   vm.runInContext(backgroundSource, context);
 
   function send(message, sender) {
@@ -140,7 +142,7 @@ test("never copies unknown secret fields into local scan storage", async functio
     }]
   });
   assert.equal(JSON.stringify(worker.state.local).includes("raw-value"), false);
-  assert.equal(worker.state.local.lastScan.schemaVersion, 4);
+  assert.equal(worker.state.local.lastScan.schemaVersion, 6);
   assert.equal(worker.state.local.lastScan.scanId, "scan-1");
   assert.match(worker.state.local.lastScan.url, /token=%5Bredacted%5D/);
 });
@@ -199,9 +201,9 @@ test("migrates v2 scans and history without copying unknown fields", function ()
   };
   const worker = createWorker(shared);
   worker.listeners.installed({ reason: "update" });
-  assert.equal(shared.local.lastScan.schemaVersion, 4);
+  assert.equal(shared.local.lastScan.schemaVersion, 6);
   assert.equal(shared.local.lastScan.scanMode, "legacy");
-  assert.equal(shared.local.scanHistory[0].schemaVersion, 4);
+  assert.equal(shared.local.scanHistory[0].schemaVersion, 6);
   assert.equal(JSON.stringify(shared.local).includes("do-not-copy"), false);
 });
 

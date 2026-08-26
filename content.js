@@ -5,9 +5,16 @@
   const pageLower = pageText.toLowerCase();
   const scanId = globalThis.__vulnscanScanId || null;
   const scanMode = globalThis.__vulnscanScanMode || "passive";
+  const enabledChecks = VulnscanChecks.normalize(globalThis.__vulnscanEnabledChecks);
+
+  function checkEnabled(id) {
+    return VulnscanChecks.enabled(enabledChecks, id);
+  }
 
   function add(severity, type, detail, options) {
     const item = options || {};
+    const check = VulnscanChecks.findingCheck(item.checkId);
+    if (check && !checkEnabled(check)) return;
     findings.push(VulnscanFindings.normalize({
       checkId: item.checkId,
       severity: severity,
@@ -225,6 +232,7 @@
   const secretVault = [];
   const seenSecrets = new Set();
   secretPatterns.forEach(function (pattern) {
+    if (!checkEnabled("passive.secrets")) return;
     const values = [];
     for (const match of pageText.matchAll(pattern.re)) {
       const raw = match[0];
@@ -287,7 +295,7 @@
     } catch (e) {}
   });
 
-  addPassiveInventory();
+  if (checkEnabled("passive.inventory")) addPassiveInventory();
 
   document.querySelectorAll("img, script, link, iframe, source, video, audio, embed, object").forEach(function (element) {
     const source = element.src || element.href || element.data;
@@ -539,9 +547,10 @@
   const normalizedFindings = VulnscanFindings.dedupe(findings);
   chrome.runtime.sendMessage({
     type: "scan_results",
-    schemaVersion: 4,
+    schemaVersion: 6,
     scanId: scanId,
     scanMode: scanMode,
+    checksRun: VulnscanChecks.effective(enabledChecks, scanMode),
     url: pageUrl,
     findings: normalizedFindings,
     summary: VulnscanFindings.summarize(normalizedFindings),
@@ -559,4 +568,5 @@
 
   delete globalThis.__vulnscanScanId;
   delete globalThis.__vulnscanScanMode;
+  delete globalThis.__vulnscanEnabledChecks;
 })();

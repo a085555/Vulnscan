@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VulnScan Ultimate</title>
+  <title>Vulnscan Security Workspace</title>
   <link rel="stylesheet" href="dashboard.css">
 </head>
 <body>
@@ -11,21 +11,22 @@
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="brand">
-        <div class="logo">◈</div>
+        <div class="logo" aria-hidden="true">V</div>
         <div>
           <div class="brand-name">VULN<span>SCAN</span></div>
-          <div id="brandVersion" class="brand-ver">v5.4.0</div>
-          <div class="brand-by">tool by a085</div>
+          <div id="brandVersion" class="brand-ver">v6.0.0</div>
+          <div class="brand-by">Security workspace</div>
         </div>
       </div>
 
       <nav class="nav">
-        <button class="nav-btn active" data-view="scan">Scan</button>
+        <button class="nav-btn active" data-view="scan">Assessment</button>
         <button class="nav-btn" data-view="history">History</button>
         <button class="nav-btn" data-view="about">About</button>
       </nav>
 
       <div class="sidebar-foot">
+        <div class="privacy-badge"><span></span> LOCAL WORKSPACE</div>
         <div class="credit-side">tool by a085</div>
         <div class="kbd-hint">Shortcuts</div>
         <div class="kbd-row"><kbd>S</kbd> Scan</div>
@@ -41,7 +42,7 @@
         <div class="target-box" id="targetBox">
           <img id="targetFav" class="target-fav" alt="">
           <div class="target-meta">
-            <div class="target-label">TARGET</div>
+            <div class="target-label">ASSESSMENT TARGET</div>
             <select id="tabSelect" class="tab-select">
               <option value="">Loading tabs...</option>
             </select>
@@ -60,7 +61,7 @@
             </div>
           </div>
           <button id="cancelScanBtn" class="btn danger" hidden>Cancel</button>
-          <button id="scanBtn" class="btn primary">Scan Selected Tab</button>
+          <button id="scanBtn" class="btn primary">Run assessment</button>
         </div>
       </header>
 
@@ -98,11 +99,45 @@
         <label>REQUEST BUDGET
           <input id="requestBudget" type="number" min="5" max="50" value="20">
         </label>
+        <div class="control-field">
+          <span class="control-label">CHECKS</span>
+          <details id="checkPicker" class="check-picker">
+            <summary id="checkPickerSummary">14 checks selected</summary>
+            <div class="check-menu">
+              <div class="check-menu-head">
+                <span>Choose checks for this scan</span>
+                <div><button id="selectAllChecks" type="button">All</button><button id="clearChecks" type="button">None</button></div>
+              </div>
+              <div class="check-group"><strong>Passive</strong>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.inventory" checked><span>Surface inventory<small>Routes, inputs, forms, resources, and authentication clues</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.dom" checked><span>DOM data flows<small>Sinks, inline handlers, and source-to-sink candidates</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.secrets" checked><span>Secret patterns<small>Provider-specific and generic credential patterns</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.forms" checked><span>Form checks<small>Transport, destination, and CSRF-field clues</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.transport" checked><span>Mixed content<small>HTTP resources loaded by HTTPS pages</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.cookies" checked><span>Page-visible cookies<small>Cookie names exposed to page JavaScript</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.components" checked><span>Component versions<small>Library and framework version observations</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="passive.source" checked><span>Source clues<small>Comments, SRI, redirect keys, technology, and paths</small></span></label>
+              </div>
+              <div class="check-group"><strong>Headers</strong>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="headers.security" checked><span>Security headers<small>CSP, HSTS, framing, MIME, and policy headers</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="headers.cookies" checked><span>Response cookie flags<small>Secure, HttpOnly, and SameSite attributes</small></span></label>
+              </div>
+              <div class="check-group"><strong>Safe Active</strong>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="safe.reflection" checked><span>Reflection probes<small>Harmless same-origin query markers</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="safe.redirects" checked><span>Redirect confirmation<small>Exact external redirect canary checks</small></span></label>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="safe.robots" checked><span>robots.txt<small>Sitemap metadata discovery</small></span></label>
+              </div>
+              <div class="check-group"><strong>Lab</strong>
+                <label class="check-option"><input class="check-toggle" type="checkbox" value="lab.paths" checked><span>Path discovery<small>Budgeted soft-404-aware common-path checks</small></span></label>
+              </div>
+            </div>
+          </details>
+        </div>
         <span id="modeHelp" class="mode-help">No scanner-generated requests.</span>
       </div>
 
       <!-- Status / progress -->
-      <div id="statusBar" class="status-bar">// ready — open a website tab, then hit Scan</div>
+      <div id="statusBar" class="status-bar">Ready — open a website tab, then run an assessment</div>
       <div id="progress" class="progress" style="display:none;"></div>
       <div id="stageProgress" class="stage-progress" hidden>
         <div class="scan-stage" data-stage="passive"><span>1</span>Passive</div>
@@ -137,11 +172,12 @@
         </div>
 
         <div id="resultOverview" class="result-overview" hidden></div>
+        <div id="comparisonPanel" class="comparison-panel" hidden></div>
 
         <div class="content-grid">
           <div class="panel">
             <div class="panel-head">
-              <span>// SECURITY HEADERS</span>
+              <span>SECURITY HEADERS</span>
               <button id="toggleHeaders" class="btn-mini">toggle</button>
             </div>
             <div id="headerResults" class="panel-body">
@@ -181,6 +217,20 @@
                 <option value="safe-active">Safe Active</option>
                 <option value="lab">Lab</option>
               </select>
+              <select id="changeFilter" aria-label="Filter by scan change">
+                <option value="all">All changes</option>
+                <option value="new">New</option>
+                <option value="changed">Changed</option>
+                <option value="unchanged">Unchanged</option>
+              </select>
+              <select id="triageFilter" aria-label="Filter by triage status">
+                <option value="all">All workflow states</option>
+                <option value="open">Open</option>
+                <option value="investigating">Investigating</option>
+                <option value="accepted">Accepted risk</option>
+                <option value="false-positive">False positive</option>
+                <option value="resolved">Resolved</option>
+              </select>
             </div>
             <div id="results" class="panel-body findings-body">
               <div class="empty-hint">No findings yet</div>
@@ -190,7 +240,7 @@
 
         <div class="panel request-panel">
           <div class="panel-head">
-            <span>// REQUEST LOG</span>
+            <span>REQUEST LOG</span>
             <div class="panel-head-actions">
               <span id="requestSummary" class="panel-note">Passive mode — no requests</span>
               <button id="toggleRequestLog" class="btn-mini">hide</button>
@@ -206,7 +256,7 @@
       <section id="view-history" class="view">
         <div class="panel">
           <div class="panel-head">
-            <span>// SCAN HISTORY</span>
+            <span>SCAN HISTORY</span>
             <button id="deleteHistoryBtn" class="btn-mini danger">Delete all</button>
           </div>
           <div id="historyList" class="panel-body">
@@ -218,14 +268,18 @@
       <!-- ABOUT VIEW -->
       <section id="view-about" class="view">
         <div class="panel about-panel">
-          <div class="panel-head"><span>// ABOUT</span></div>
+          <div class="panel-head"><span>ABOUT</span></div>
           <div class="panel-body about-body">
-            <p><strong>VulnScan Ultimate</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v5.4.0</strong>.</p>
+            <p><strong>Vulnscan Security Workspace</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v6.0.0</strong>.</p>
             <ul>
               <li><strong>Passive</strong> inspects the loaded page without sending scanner-generated requests.</li>
               <li><strong>Safe Active</strong> allows same-origin GET, HEAD, and OPTIONS checks within a request budget.</li>
               <li><strong>Lab</strong> performs controlled, soft-404-aware path discovery.</li>
               <li><strong>Full Scan</strong> runs Passive, Safe Active, and Lab in order under one shared request budget.</li>
+              <li><strong>Selectable checks</strong> let you run only the check families relevant to the target.</li>
+              <li><strong>Scan comparison</strong> highlights new, changed, resolved, and unchanged results against the last matching scan.</li>
+              <li><strong>Investigation view</strong> adds impact, remediation, verification steps, technical metadata, and a local workflow state to every result.</li>
+              <li><strong>Cross-browser builds</strong> support desktop Chrome and Firefox from the same source.</li>
             </ul>
             <p class="muted">Site access is requested for the exact selected origin so the extension can inspect that tab. Scan reports and history are stored locally. Raw secret values stay in browser session memory and only leave it through the separate full-secret export.</p>
             <div class="about-actions">
@@ -240,9 +294,35 @@
     </main>
   </div>
 
+  <div id="findingDrawer" class="finding-drawer" hidden>
+    <button id="findingDrawerBackdrop" class="drawer-backdrop" aria-label="Close finding details"></button>
+    <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="findingDrawerTitle">
+      <header class="drawer-header">
+        <div>
+          <div class="drawer-eyebrow">FINDING INVESTIGATION</div>
+          <h2 id="findingDrawerTitle">Finding details</h2>
+        </div>
+        <button id="findingDrawerClose" class="drawer-close" aria-label="Close finding details">×</button>
+      </header>
+      <div id="findingDrawerBody" class="drawer-body"></div>
+      <footer class="drawer-footer">
+        <label>Workflow state
+          <select id="findingTriageState">
+            <option value="open">Open</option>
+            <option value="investigating">Investigating</option>
+            <option value="accepted">Accepted risk</option>
+            <option value="false-positive">False positive</option>
+            <option value="resolved">Resolved</option>
+          </select>
+        </label>
+        <button id="copyFindingBrief" class="btn ghost">Copy investigation brief</button>
+      </footer>
+    </aside>
+  </div>
+
   <div id="authorizationModal" class="modal" hidden>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="authorizationTitle">
-      <div class="panel-head"><span id="authorizationTitle">// CONFIRM ACTIVE SCAN</span></div>
+      <div class="panel-head"><span id="authorizationTitle">CONFIRM ACTIVE SCAN</span></div>
       <div class="modal-body">
         <p id="authorizationDetails"></p>
         <label class="confirm-row"><input id="authorizationCheck" type="checkbox"> I confirm that I own this target or have permission to test it.</label>
@@ -256,7 +336,7 @@
 
   <div id="secretExportModal" class="modal" hidden>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="secretExportTitle">
-      <div class="panel-head"><span id="secretExportTitle">// EXPORT RAW SECRET VALUES</span></div>
+      <div class="panel-head"><span id="secretExportTitle">EXPORT RAW SECRET VALUES</span></div>
       <div class="modal-body">
         <p>This file may contain live credentials. Store it securely and delete it when it is no longer needed.</p>
         <label class="confirm-row"><input id="secretExportCheck" type="checkbox"> I understand this export contains unredacted values.</label>
@@ -269,6 +349,8 @@
   </div>
 
   <script src="finding-model.js"></script>
+  <script src="finding-guidance.js"></script>
+  <script src="scan-checks.js"></script>
   <script src="request-controller.js"></script>
   <script src="dashboard.js"></script>
 </body>

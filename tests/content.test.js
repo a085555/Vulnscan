@@ -5,6 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
 const contentSource = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
 
 function scan(options) {
@@ -38,10 +39,12 @@ function scan(options) {
     localStorage: settings.localStorage,
     sessionStorage: settings.sessionStorage,
     __vulnscanScanId: "scan-1",
-    __vulnscanScanMode: settings.mode || "passive"
+    __vulnscanScanMode: settings.mode || "passive",
+    __vulnscanEnabledChecks: settings.enabledChecks
   };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
+  vm.runInContext(checkSource, context);
   vm.runInContext(contentSource, context);
   return messages;
 }
@@ -66,7 +69,7 @@ test("exports every distinct secret while keeping one redacted type finding", fu
   assert.equal(vault.secrets.length, 2);
   assert.equal(new Set(vault.secrets).size, 2);
   assert.equal(vault.scanId, "scan-1");
-  assert.equal(result(messages).schemaVersion, 4);
+  assert.equal(result(messages).schemaVersion, 6);
   assert.equal(result(messages).scanMode, "passive");
 });
 
@@ -78,6 +81,20 @@ test("keeps generic token patterns in review", function () {
   assert.equal(finding.bucket, "review");
   assert.equal(finding.confidence, "low");
   assert.equal(finding.detail.includes(jwt), false);
+});
+
+test("runs only selected passive check families", function () {
+  const secret = "sk_live_" + "S".repeat(24);
+  const messages = scan({
+    html: secret + " <script>output.innerHTML = location.hash;</script>",
+    scripts: ["output.innerHTML = location.hash;"],
+    enabledChecks: ["passive.dom"]
+  });
+  const findings = result(messages).findings;
+  assert.equal(findings.some(function (finding) { return finding.checkId.startsWith("dom."); }), true);
+  assert.equal(findings.some(function (finding) { return finding.checkId.startsWith("secret."); }), false);
+  assert.equal(messages.some(function (message) { return message.type === "export_secrets"; }), false);
+  assert.deepEqual(Array.from(result(messages).checksRun), ["passive.dom"]);
 });
 
 test("routes password assignments through the redacted export vault", function () {

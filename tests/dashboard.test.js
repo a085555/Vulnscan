@@ -5,6 +5,8 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const guidanceSource = fs.readFileSync(path.join(__dirname, "..", "finding-guidance.js"), "utf8");
+const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
 const requestSource = fs.readFileSync(path.join(__dirname, "..", "request-controller.js"), "utf8");
 const dashboardSource = fs.readFileSync(path.join(__dirname, "..", "dashboard.js"), "utf8");
 
@@ -61,6 +63,17 @@ function createDashboard() {
   modeInputs[0].checked = true;
   modeInputs[1].value = "safe";
   modeInputs[2].value = "lab";
+  const checkIds = [
+    "passive.inventory", "passive.dom", "passive.secrets", "passive.forms", "passive.transport", "passive.cookies",
+    "passive.components", "passive.source", "headers.security", "headers.cookies", "safe.reflection", "safe.redirects",
+    "safe.robots", "lab.paths"
+  ];
+  const checkToggles = checkIds.map(function (id) {
+    const input = createElement("check-" + id);
+    input.value = id;
+    input.checked = true;
+    return input;
+  });
   let runtimeListener = null;
   let onUpdatedListener = null;
   let currentScanId = null;
@@ -88,6 +101,7 @@ function createDashboard() {
       if (selector === ".bucket-filter") return bucketButtons;
       if (selector === ".filter") return filterButtons;
       if (selector === "input[name='scanModeChoice']") return modeInputs;
+      if (selector === ".check-toggle") return checkToggles;
       return [];
     },
     addEventListener: function () {},
@@ -96,7 +110,7 @@ function createDashboard() {
   const chrome = {
     runtime: {
       lastError: null,
-      getManifest: function () { return { version: "5.4.0" }; },
+      getManifest: function () { return { version: "6.0.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -146,7 +160,7 @@ function createDashboard() {
       executeScript: async function (options) {
         if (options.files && options.files.includes("content.js")) {
           storage.lastScan = {
-            schemaVersion: 4,
+            schemaVersion: 6,
             scanId: currentScanId,
             scanMode: "passive",
             url: tabResponse.url,
@@ -154,7 +168,8 @@ function createDashboard() {
             findings: [],
             summary: { high: 0, medium: 0, low: 0, info: 0, review: 0, findings: 0 },
             risk: "info",
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            checksRun: context.VulnscanChecks.effective(checkIds, "passive")
           };
         }
       }
@@ -185,6 +200,8 @@ function createDashboard() {
   };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
+  vm.runInContext(guidanceSource, context);
+  vm.runInContext(checkSource, context);
   vm.runInContext(requestSource, context);
   vm.runInContext(dashboardSource, context);
   return {
@@ -193,6 +210,7 @@ function createDashboard() {
     bucketButtons: bucketButtons,
     filterButtons: filterButtons,
     modeInputs: modeInputs,
+    checkToggles: checkToggles,
     runtimeListener: function () { return runtimeListener; },
     sentMessages: sentMessages,
     storage: storage,
@@ -323,7 +341,7 @@ test("passive mode sends no scanner requests or target reloads", async function 
   await dashboard.context.runScan();
   assert.equal(dashboard.getReloadCount(), 0);
   assert.equal(dashboard.getFetchCount(), 0);
-  assert.equal(dashboard.storage.lastScan.schemaVersion, 4);
+  assert.equal(dashboard.storage.lastScan.schemaVersion, 6);
   assert.equal(dashboard.storage.lastScan.scanMode, "passive");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_begin"; }), true);
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_end"; }), true);
@@ -388,6 +406,68 @@ test("Lab mode runs path discovery without Safe Active query probes", async func
   assert.equal(dashboard.storage.lastScan.stageSummary.safe, "skipped");
 });
 
+test("selected checks control active requests and the saved check profile", async function () {
+  const dashboard = createDashboard();
+  dashboard.checkToggles.forEach(function (input) { input.checked = false; });
+  dashboard.checkToggles.find(function (input) { return input.value === "passive.secrets"; }).checked = true;
+  dashboard.checkToggles.find(function (input) { return input.value === "safe.reflection"; }).checked = true;
+  dashboard.checkToggles.find(function (input) { return input.value === "safe.robots"; }).checked = true;
+  dashboard.element("scanMode").value = "safe";
+  dashboard.element("requestBudget").value = "20";
+  await dashboard.context.loadTabs();
+  const scan = dashboard.context.runScan();
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  dashboard.element("authorizationCheck").checked = true;
+  dashboard.element("authorizationCheck").listeners.change();
+  dashboard.element("authorizationStart").listeners.click();
+  await scan;
+  assert.equal(dashboard.getFetchCount(), 7);
+  assert.deepEqual(Array.from(dashboard.storage.lastScan.checksRun), ["passive.secrets", "safe.reflection", "safe.robots"]);
+  assert.equal(dashboard.storage.lastScan.stageSummary.headers, "skipped");
+  assert.equal(dashboard.storage.lastScan.stageSummary.lab, "skipped");
+});
+
+test("compares with the previous scan using the same target and check profile", function () {
+  const dashboard = createDashboard();
+  const model = dashboard.context.VulnscanFindings;
+  const checks = ["passive.transport"];
+  const common = model.normalize({
+    checkId: "transport.common", severity: "medium", confidence: "high", bucket: "finding", category: "transport",
+    type: "Common", detail: "same", source: "passive"
+  });
+  const resolved = model.normalize({
+    checkId: "transport.old", severity: "medium", confidence: "high", bucket: "finding", category: "transport",
+    type: "Old issue", detail: "gone", source: "passive"
+  });
+  const added = model.normalize({
+    checkId: "transport.new", severity: "medium", confidence: "high", bucket: "finding", category: "transport",
+    type: "New issue", detail: "appeared", source: "passive"
+  });
+  const base = {
+    schemaVersion: 5,
+    scanMode: "passive",
+    url: "https://example.test/",
+    urlFingerprint: model.key("https://example.test/"),
+    checksRun: checks,
+    comparisonReady: true,
+    requestSummary: { mode: "passive", budget: 0, attempted: 0, completed: 0 },
+    stageSummary: { passive: "complete", headers: "skipped", safe: "skipped", lab: "skipped" }
+  };
+  dashboard.storage.scanHistory = [Object.assign({}, base, {
+    scanId: "previous", timestamp: 10, findings: [common, resolved]
+  })];
+  dashboard.context.renderFindings(Object.assign({}, base, {
+    scanId: "current", timestamp: 20, findings: [common, added]
+  }));
+  assert.match(dashboard.element("comparisonPanel").innerHTML, /1 new/);
+  assert.match(dashboard.element("comparisonPanel").innerHTML, /1 resolved/);
+  assert.match(dashboard.element("results").innerHTML, /change-badge new/);
+  dashboard.element("changeFilter").value = "new";
+  dashboard.element("changeFilter").listeners.change();
+  assert.match(dashboard.element("results").innerHTML, /New issue/);
+  assert.doesNotMatch(dashboard.element("results").innerHTML, /Common/);
+});
+
 test("groups results and applies search, category, confidence, and stage filters", function () {
   const dashboard = createDashboard();
   const model = dashboard.context.VulnscanFindings;
@@ -450,7 +530,7 @@ test("redacted reports never include raw secret values", function () {
   dashboard.setExportSecrets({ secrets: [raw], available: true });
   assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
   assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
-  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "4.0");
+  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.0");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
 
   dashboard.element("exportSecretsBtn").listeners.click();
@@ -459,6 +539,52 @@ test("redacted reports never include raw secret values", function () {
   dashboard.element("secretExportCheck").listeners.change();
   dashboard.element("secretExportConfirm").listeners.click();
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), true);
+});
+
+test("opens a detailed investigation and persists its local workflow state", function () {
+  const dashboard = createDashboard();
+  const model = dashboard.context.VulnscanFindings;
+  const finding = model.normalize({
+    checkId: "active.open-redirect",
+    severity: "high",
+    confidence: "high",
+    bucket: "finding",
+    category: "redirects",
+    type: "Confirmed open redirect",
+    detail: "The next parameter redirected to the controlled destination.",
+    evidence: "Exact redirect event matched the scan canary.",
+    verification: "Repeat with a controlled HTTPS destination.",
+    source: "safe-active"
+  });
+  const scan = {
+    schemaVersion: 6,
+    scanId: "scan-investigation",
+    scanMode: "safe",
+    url: "https://example.test/",
+    urlFingerprint: model.key("https://example.test/"),
+    timestamp: Date.now(),
+    findings: [finding]
+  };
+  dashboard.context.renderFindings(scan);
+  dashboard.context.openFindingDrawer(finding.fingerprint);
+
+  assert.equal(dashboard.element("findingDrawer").hidden, false);
+  assert.equal(dashboard.element("findingDrawerTitle").textContent, "Confirmed open redirect");
+  assert.match(dashboard.element("findingDrawerBody").innerHTML, /Why it matters/);
+  assert.match(dashboard.element("findingDrawerBody").innerHTML, /Recommended action/);
+  assert.match(dashboard.element("findingDrawerBody").innerHTML, /Technical details/);
+
+  dashboard.element("findingTriageState").value = "investigating";
+  dashboard.element("findingTriageState").listeners.change();
+  const saved = Object.values(dashboard.storage.findingTriage);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].status, "investigating");
+
+  const reportFinding = dashboard.context.buildJsonReport(scan).findings[0];
+  assert.equal(reportFinding.workflowState, "investigating");
+  assert.match(reportFinding.impact, /trusted origin|redirect/i);
+  assert.match(reportFinding.remediation, /known destinations|relative paths/i);
+  assert.equal(reportFinding.investigationSteps.length >= 2, true);
 });
 
 test("rejects cached v5.1 scan data", function () {

@@ -1,4 +1,6 @@
-importScripts("finding-model.js");
+if (typeof importScripts === "function") {
+  importScripts("finding-model.js", "scan-checks.js");
+}
 
 const headerCache = {};
 let redirectCache = {};
@@ -83,11 +85,11 @@ function cleanStageSummary(summary, mode) {
 }
 
 function migrateScan(scan) {
-  if (!scan || !scan.url || !scan.urlFingerprint || ![2, 3, 4].includes(scan.schemaVersion)) return null;
+  if (!scan || !scan.url || !scan.urlFingerprint || ![2, 3, 4, 5, 6].includes(scan.schemaVersion)) return null;
   const findings = VulnscanFindings.dedupe(scan.findings || []);
   const mode = ["passive", "safe", "lab", "full"].includes(scan.scanMode) ? scan.scanMode : "legacy";
   return {
-    schemaVersion: 4,
+    schemaVersion: 6,
     scanId: scan.scanId || null,
     scanMode: mode,
     url: redactUrl(scan.url),
@@ -97,7 +99,8 @@ function migrateScan(scan) {
     summary: VulnscanFindings.summarize(findings),
     risk: VulnscanFindings.risk(findings),
     requestSummary: cleanRequestSummary(scan.requestSummary, mode),
-    stageSummary: cleanStageSummary(scan.stageSummary, mode)
+    stageSummary: cleanStageSummary(scan.stageSummary, mode),
+    checksRun: VulnscanChecks.effective(scan.checksRun, mode)
   };
 }
 
@@ -122,19 +125,29 @@ chrome.webRequest.onBeforeRequest.addListener(
   { urls: ["<all_urls>"], types: ["main_frame"] }
 );
 
-chrome.webRequest.onHeadersReceived.addListener(
-  function (details) {
-    if (details.tabId >= 0 && details.type === "main_frame") {
-      headerCache[details.tabId] = {
-        headers: details.responseHeaders || [],
-        url: details.url,
-        statusCode: details.statusCode
-      };
-    }
-  },
-  { urls: ["<all_urls>"], types: ["main_frame"] },
-  ["responseHeaders", "extraHeaders"]
-);
+function captureResponseHeaders(details) {
+  if (details.tabId >= 0 && details.type === "main_frame") {
+    headerCache[details.tabId] = {
+      headers: details.responseHeaders || [],
+      url: details.url,
+      statusCode: details.statusCode
+    };
+  }
+}
+
+try {
+  chrome.webRequest.onHeadersReceived.addListener(
+    captureResponseHeaders,
+    { urls: ["<all_urls>"], types: ["main_frame"] },
+    ["responseHeaders", "extraHeaders"]
+  );
+} catch (error) {
+  chrome.webRequest.onHeadersReceived.addListener(
+    captureResponseHeaders,
+    { urls: ["<all_urls>"], types: ["main_frame"] },
+    ["responseHeaders"]
+  );
+}
 
 chrome.webRequest.onBeforeRedirect.addListener(
   function (details) {
@@ -167,15 +180,16 @@ if (chrome.tabs.onReplaced) {
   });
 }
 
-chrome.action.onClicked.addListener(async function () {
+chrome.action.onClicked.addListener(function () {
   const url = chrome.runtime.getURL("dashboard.html");
-  const tabs = await chrome.tabs.query({ url: url });
-  if (tabs && tabs.length > 0) {
-    await chrome.tabs.update(tabs[0].id, { active: true });
-    await chrome.windows.update(tabs[0].windowId, { focused: true });
-  } else {
-    await chrome.tabs.create({ url: url });
-  }
+  chrome.tabs.query({ url: url }, function (tabs) {
+    if (tabs && tabs.length > 0) {
+      chrome.tabs.update(tabs[0].id, { active: true }, function () {});
+      chrome.windows.update(tabs[0].windowId, { focused: true }, function () {});
+      return;
+    }
+    chrome.tabs.create({ url: url }, function () {});
+  });
 });
 
 chrome.runtime.onInstalled.addListener(function () {
@@ -189,8 +203,10 @@ chrome.runtime.onInstalled.addListener(function () {
       const history = data.scanHistory.map(function (entry) {
         const mode = ["passive", "safe", "lab", "full"].includes(entry.scanMode) ? entry.scanMode : "legacy";
         return {
-          schemaVersion: 4,
+          schemaVersion: 6,
+          scanId: entry.scanId || null,
           url: redactUrl(entry.url),
+          urlFingerprint: entry.urlFingerprint || null,
           risk: entry.risk || "legacy",
           timestamp: entry.timestamp || Date.now(),
           summary: entry.summary && typeof entry.summary === "object" ? {
@@ -205,7 +221,10 @@ chrome.runtime.onInstalled.addListener(function () {
           reviewCount: Number.isInteger(entry.reviewCount) ? entry.reviewCount : 0,
           scanMode: mode,
           requestSummary: entry.requestSummary ? cleanRequestSummary(entry.requestSummary, mode) : null,
-          stageSummary: cleanStageSummary(entry.stageSummary, mode)
+          stageSummary: cleanStageSummary(entry.stageSummary, mode),
+          checksRun: VulnscanChecks.effective(entry.checksRun, mode),
+          findings: VulnscanFindings.dedupe(entry.findings || []),
+          comparisonReady: entry.schemaVersion >= 5 && Array.isArray(entry.findings)
         };
       }).slice(0, 12);
       chrome.storage.local.set({ scanHistory: history });
@@ -222,18 +241,20 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === "scan_results") {
     const findings = VulnscanFindings.dedupe(message.findings || []);
     const summary = VulnscanFindings.summarize(findings);
+    const mode = ["passive", "safe", "lab", "full"].includes(message.scanMode) ? message.scanMode : "passive";
     chrome.storage.local.set({
       lastScan: {
-        schemaVersion: 4,
+        schemaVersion: 6,
         scanId: message.scanId || null,
-        scanMode: ["passive", "safe", "lab", "full"].includes(message.scanMode) ? message.scanMode : "passive",
+        scanMode: mode,
         url: redactUrl(message.url),
         urlFingerprint: urlFingerprint(message.url),
         findings: findings,
         timestamp: Date.now(),
         summary: summary,
         risk: VulnscanFindings.risk(findings),
-        stageSummary: cleanStageSummary(message.stageSummary, message.scanMode)
+        stageSummary: cleanStageSummary(message.stageSummary, mode),
+        checksRun: VulnscanChecks.effective(message.checksRun, mode)
       }
     }, function () {
       sendResponse({ ok: true });

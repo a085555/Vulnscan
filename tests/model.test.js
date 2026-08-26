@@ -57,3 +57,21 @@ test("keeps distinct details and derives risk from findings only", function () {
   });
   assert.equal(model.risk([review, finding]), "high");
 });
+
+test("compares findings by stable fingerprint", function () {
+  const first = model.normalize({
+    checkId: "transport.mixed", severity: "medium", confidence: "high", bucket: "finding", type: "Mixed content", detail: "one"
+  });
+  const changed = model.normalize(Object.assign({}, first, { severity: "high", fingerprint: first.fingerprint }));
+  const resolved = model.normalize({
+    checkId: "form.external", severity: "low", confidence: "low", bucket: "review", type: "External form", detail: "old"
+  });
+  const added = model.normalize({
+    checkId: "redirect.confirmed", severity: "high", confidence: "high", bucket: "finding", type: "Redirect", detail: "new"
+  });
+  const comparison = model.compare([changed, added], [first, resolved]);
+  assert.equal(comparison.new.length, 1);
+  assert.equal(comparison.changed.length, 1);
+  assert.equal(comparison.resolved.length, 1);
+  assert.equal(comparison.unchanged.length, 0);
+});
