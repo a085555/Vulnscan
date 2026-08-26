@@ -11,10 +11,10 @@ test("manifest and visible version are consistent", function () {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const releaseNotes = fs.readFileSync(path.join(root, "RELEASE_NOTES.md"), "utf8");
   const dashboard = fs.readFileSync(path.join(root, "dashboard.js"), "utf8");
-  assert.equal(manifest.version, "6.2.0");
+  assert.equal(manifest.version, "6.3.0");
   assert.equal(manifest.minimum_chrome_version, "102");
-  assert.match(readme, /v6\.2\.0/);
-  assert.match(releaseNotes, /Vulnscan v6\.2\.0/);
+  assert.match(readme, /v6\.3\.0/);
+  assert.match(releaseNotes, /Vulnscan v6\.3\.0/);
   assert.equal(packageJson.version, manifest.version);
   assert.match(dashboard, /getManifest\(\)\.version/);
   assert.equal(manifest.action.default_popup, undefined);
@@ -30,7 +30,20 @@ test("manifest and visible version are consistent", function () {
   assert.match(html, /id="comparisonPanel"/);
   assert.match(html, /id="findingDrawer"/);
   assert.match(html, /id="scanMapDialog"/);
+  assert.match(html, /id="scanMapConfidence"/);
+  assert.match(html, /id="scanMapFocus"/);
+  assert.match(html, /id="showFindingMapBtn"/);
   assert.match(html, /Full Scan/);
+});
+
+test("scan map keeps hover geometry stable and separates node selection from panning", function () {
+  const css = fs.readFileSync(path.join(root, "dashboard.css"), "utf8");
+  const dashboard = fs.readFileSync(path.join(root, "dashboard.js"), "utf8");
+  assert.match(css, /scan-map-node-halo/);
+  assert.match(css, /vector-effect:\s*non-scaling-stroke/);
+  assert.doesNotMatch(css, /scan-map-node:hover[^}]*stroke-width/);
+  assert.match(dashboard, /VulnscanMap\.canPanFrom\(event\.target\)/);
+  assert.match(dashboard, /Math\.hypot[\s\S]*< 5/);
 });
 
 test("browser manifests share the release version and use supported background formats", function () {
@@ -81,11 +94,11 @@ test("passive storage inventory reads names but not values", function () {
   assert.doesNotMatch(helper, /getItem|storage\s*\[/);
 });
 
-test("v6.2 data and active-check invariants remain explicit", function () {
+test("v6.3 data and active-check invariants remain explicit", function () {
   const dashboard = fs.readFileSync(path.join(root, "dashboard.js"), "utf8");
   const content = fs.readFileSync(path.join(root, "content.js"), "utf8");
   const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
-  assert.match(dashboard, /reportVersion:\s*"6\.2"/);
+  assert.match(dashboard, /reportVersion:\s*"6\.3"/);
   assert.match(dashboard, /schemaVersion:\s*8/);
   assert.match(content, /schemaVersion:\s*8/);
   assert.match(background, /responseMode:\s*"discard"|corsProbeKey/);

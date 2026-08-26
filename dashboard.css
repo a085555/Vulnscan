@@ -1037,7 +1037,7 @@ kbd {
 .finding .detail { color: #adbbcc; }
 .finding-context summary { color: #91b4f5; }
 .source-badge { color: #9eb1c9; background: #192537; }
-.copy-btn, .inspect-btn {
+.copy-btn, .inspect-btn, .map-btn {
   font-size: 10px;
   background: transparent;
   border: 1px solid var(--border);
@@ -1047,7 +1047,8 @@ kbd {
   cursor: pointer;
 }
 .inspect-btn { color: #9cbcff; border-color: #315487; }
-.copy-btn:hover, .inspect-btn:hover { color: #dce8ff; border-color: #6e9dff; }
+.map-btn { color: #8fcfc0; border-color: #32685f; }
+.copy-btn:hover, .inspect-btn:hover, .map-btn:hover { color: #dce8ff; border-color: #6e9dff; }
 .triage-badge { font-size: 9px; padding: 2px 6px; border-radius: 999px; color: #aab8ca; background: #1a2433; text-transform: uppercase; }
 .triage-badge.investigating { color: #9bc0ff; background: #162c4d; }
 .triage-badge.accepted { color: #f4c477; background: #342819; }
@@ -1134,24 +1135,33 @@ kbd {
 .scan-map-toolbar input, .scan-map-toolbar select, .scan-map-toolbar button { min-height: 33px; padding: 7px 10px; border: 1px solid #2b3e5a; border-radius: 7px; color: #b8c6d8; background: #121d2b; font-size: 11px; }
 .scan-map-toolbar input { min-width: 190px; flex: 1 1 220px; }
 .scan-map-toolbar button { cursor: pointer; }
-.scan-map-toolbar button:hover, .scan-map-view.active { color: #d9e7ff; border-color: #547fc2; background: #193052; }
+.scan-map-toolbar button:hover, .scan-map-view.active, .scan-map-focus.active { color: #d9e7ff; border-color: #547fc2; background: #193052; }
 .scan-map-view-switch, .scan-map-zoom { display: flex; gap: 5px; }
 .scan-map-body { display: grid; grid-template-columns: minmax(0, 1fr) 310px; min-height: 0; }
 .scan-map-viewport { position: relative; min-height: 360px; overflow: hidden; background-color: #09101a; background-image: radial-gradient(#243650 1px, transparent 1px); background-size: 22px 22px; cursor: grab; touch-action: none; }
 .scan-map-viewport.dragging { cursor: grabbing; }
 #scanMapSvg { display: block; width: 100%; height: 100%; min-height: 360px; }
-.scan-map-edge { fill: none; stroke: #344865; stroke-width: 1.4; opacity: .72; }
-.scan-map-node { cursor: pointer; outline: none; }
-.scan-map-node rect { fill: #152132; stroke: #405573; stroke-width: 1.2; }
-.scan-map-node:hover rect, .scan-map-node:focus rect { stroke: #83aaff; stroke-width: 2; }
-.scan-map-node.target rect { fill: #173557; stroke: #6f9ee7; }
-.scan-map-node.group rect, .scan-map-node.stage rect { fill: #17273d; stroke: #45678f; }
-.scan-map-node.check rect { fill: #142233; stroke: #385271; }
-.scan-map-node.finding rect { fill: #2e1921; stroke: #a84d62; }
-.scan-map-node.finding.review rect { fill: #2b2517; stroke: #9a7940; }
-.scan-map-node.finding.high rect { stroke: #ff6078; }
-.scan-map-node.finding.medium rect { stroke: #e99d57; }
-.scan-map-node.finding.low rect { stroke: #e0c064; }
+.scan-map-edge { fill: none; stroke: #344865; stroke-width: 1.4; opacity: .72; vector-effect: non-scaling-stroke; transition: opacity .14s ease, stroke .14s ease; }
+.scan-map-node { cursor: pointer; outline: none; opacity: 1; transition: opacity .14s ease; }
+.scan-map-node-frame { fill: #152132; stroke: #405573; stroke-width: 1.2; vector-effect: non-scaling-stroke; transition: fill .14s ease, stroke .14s ease; }
+.scan-map-node-halo { fill: none; stroke: #8ab1f0; stroke-width: 2.4; opacity: 0; pointer-events: none; vector-effect: non-scaling-stroke; transition: opacity .14s ease; }
+.scan-map-node:hover .scan-map-node-frame, .scan-map-node:focus .scan-map-node-frame { fill: #1b2a40; stroke: #83aaff; }
+.scan-map-node:hover .scan-map-node-halo, .scan-map-node:focus .scan-map-node-halo, .scan-map-node.map-selected .scan-map-node-halo { opacity: 1; }
+.scan-map-node.map-selected .scan-map-node-frame { fill: #203554; stroke: #a8c8ff; }
+.scan-map-node.target .scan-map-node-frame { fill: #173557; stroke: #6f9ee7; }
+.scan-map-node.group .scan-map-node-frame, .scan-map-node.stage .scan-map-node-frame { fill: #17273d; stroke: #45678f; }
+.scan-map-node.check .scan-map-node-frame { fill: #142233; stroke: #385271; }
+.scan-map-node.check.status-limited .scan-map-node-frame, .scan-map-node.check.status-stopped .scan-map-node-frame { stroke: #c4944c; }
+.scan-map-node.check.status-unavailable .scan-map-node-frame { stroke: #8d6070; }
+.scan-map-node.finding .scan-map-node-frame { fill: #2e1921; stroke: #a84d62; }
+.scan-map-node.finding.review .scan-map-node-frame { fill: #2b2517; stroke: #9a7940; }
+.scan-map-node.finding.high .scan-map-node-frame { stroke: #ff6078; }
+.scan-map-node.finding.medium .scan-map-node-frame { stroke: #e99d57; }
+.scan-map-node.finding.low .scan-map-node-frame { stroke: #e0c064; }
+.scan-map-layer.has-selection .scan-map-node { opacity: .18; }
+.scan-map-layer.has-selection .scan-map-edge { opacity: .09; }
+.scan-map-layer.has-selection .scan-map-node.map-related { opacity: 1; }
+.scan-map-layer.has-selection .scan-map-edge.map-related { stroke: #6f9ee7; opacity: .95; }
 .scan-map-node-title { fill: #d3deed; font: 600 11px Inter, system-ui, sans-serif; }
 .scan-map-node-subtitle { fill: #8295ac; font: 9px "JetBrains Mono", monospace; text-transform: uppercase; }
 .scan-map-legend { position: absolute; left: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 9px; padding: 7px 9px; border: 1px solid #263a56; border-radius: 7px; color: #8799af; background: #0a111ddd; font-size: 9px; }
@@ -1166,6 +1176,9 @@ kbd {
 .scan-map-details dl { display: grid; gap: 5px; margin: 14px 0; }
 .scan-map-details dt { margin-top: 7px; color: #71849c; font-size: 9px; letter-spacing: .6px; text-transform: uppercase; }
 .map-detail-eyebrow { color: #80a4dd; font-size: 9px; letter-spacing: .8px; text-transform: uppercase; }
+.map-breadcrumb { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 13px; color: #7890ae; font-size: 9px; line-height: 1.5; }
+.map-breadcrumb span:not(:last-child)::after { content: "›"; margin-left: 5px; color: #465b78; }
+.map-detail-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
 .map-readonly { color: #e1b569 !important; }
 .scan-map-footer { display: flex; justify-content: space-between; gap: 14px; padding: 9px 16px; border-top: 1px solid #24344d; color: #74869d; background: #0d151f; font-size: 9px; }
 

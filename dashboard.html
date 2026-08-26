@@ -321,6 +321,7 @@
           </select>
         </label>
         <div class="drawer-actions">
+          <button id="showFindingMapBtn" class="btn ghost">Show in scan map</button>
           <button id="showAffectedBtn" class="btn ghost" hidden>Show on page</button>
           <button id="copyFindingBrief" class="btn ghost">Copy investigation brief</button>
         </div>
@@ -367,6 +368,13 @@
           <option value="low">Low</option>
           <option value="info">Info</option>
         </select>
+        <select id="scanMapConfidence" aria-label="Filter confidence">
+          <option value="all">All confidence</option>
+          <option value="high">High confidence</option>
+          <option value="medium">Medium confidence</option>
+          <option value="low">Low confidence</option>
+        </select>
+        <button id="scanMapFocus" class="scan-map-focus active" type="button" aria-pressed="true" title="Fade nodes outside the selected path">Focus path</button>
         <div class="scan-map-zoom" role="group" aria-label="Map zoom">
           <button id="scanMapZoomOut" title="Zoom out">−</button>
           <button id="scanMapFit">Fit</button>
@@ -385,12 +393,12 @@
           </div>
         </div>
         <aside id="scanMapDetails" class="scan-map-details" aria-live="polite">
-          <div class="empty-hint">Select a map node to inspect it.</div>
+          <div class="empty-hint">Select a node to inspect its evidence path.</div>
         </aside>
       </div>
       <footer class="scan-map-footer">
         <span id="scanMapStatus">No map loaded</span>
-        <span>Visual evidence only — not proof of an exploit chain.</span>
+        <span>Double-click to centre · Arrow keys to navigate · Visual evidence is not proof of an exploit chain.</span>
       </footer>
     </section>
   </div>

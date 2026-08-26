@@ -2,16 +2,16 @@
 
 Desktop browser security workspace for controlled passive and safe-active webpage checks.
 
-**Tool by a085** · v6.2.0
+**Tool by a085** · v6.3.0
 
-## What is new in v6.2
+## What is new in v6.3
 
-- Interactive Surface and Scan flow maps connect results to the page surfaces and checks that produced them
-- Guided exploitability sections explain observed evidence, required conditions, likely paths, weakening evidence, and safe lab verification
-- Cross-origin policy review covers CORS, COOP, COEP, and CORP without treating missing optional policies as vulnerabilities
-- One credential-free CORS policy probe records whether the browser sent and the server accepted the exact extension origin
-- Same-origin declared source maps can be confirmed within strict request and response limits
-- JWT review decodes bounded header and expiry metadata without displaying claims or raw token values
+- Stable SVG hover and focus styling prevents node boxes from shifting or flickering at different zoom levels
+- Node gestures are separated from canvas panning, with a movement threshold for deliberate drag actions
+- Selecting a node highlights its evidence route and fades unrelated areas when Focus path is enabled
+- Finding cards and investigation details can open and centre the matching map node directly
+- Confidence filtering, coverage states, breadcrumbs, and improved graph ordering make dense maps easier to read
+- Cursor-centred zoom, high-range node centring, double-click focus, and keyboard navigation improve large-map exploration
 
 ## Features
 
@@ -30,7 +30,7 @@ Desktop browser security workspace for controlled passive and safe-active webpag
 - New, changed, resolved, and unchanged result filters
 - Session-only redacted request log
 - Search and filters for category, confidence, severity, stage, change, and workflow state
-- Searchable interactive scan maps for current and historical scans
+- Searchable interactive scan maps with evidence-path focus for current and historical scans
 - Plain-language exploitability guidance with non-executable lab templates where a safe reproduction is useful
 - Secrets hidden throughout the workspace and redacted reports; distinct full values remain available through a separate confirmed export
 - Visible coverage warnings whenever a scanner processing limit is reached
@@ -98,7 +98,7 @@ Workflow states are stored locally against the target and stable identity. They 
 
 ## Scan map
 
-The Surface view links results to bounded observations such as routes, parameter names, forms, resources, external origins, storage names, and authentication clues. The Scan flow view shows which selected stage and check produced each result, including limited or unavailable active-check coverage. Historical v6.2 scans keep their redacted map data; earlier compatible history can still use Scan flow view.
+The Surface view links results to bounded observations such as routes, parameter names, forms, resources, external origins, storage names, and authentication clues. The Scan flow view shows which selected stage and check produced each result, including limited or unavailable active-check coverage. Selecting a node highlights its evidence route, while double-clicking centres it at a readable scale. Arrow keys move between neighbouring nodes. Historical v6.2 and v6.3 scans keep their redacted map data; earlier compatible history can still use Scan flow view.
 
 ## Scan comparison
 

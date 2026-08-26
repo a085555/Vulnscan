@@ -62,6 +62,7 @@ const findingDrawerBody = document.getElementById("findingDrawerBody");
 const findingTriageState = document.getElementById("findingTriageState");
 const copyFindingBriefBtn = document.getElementById("copyFindingBrief");
 const showAffectedBtn = document.getElementById("showAffectedBtn");
+const showFindingMapBtn = document.getElementById("showFindingMapBtn");
 const scanMapDialog = document.getElementById("scanMapDialog");
 const scanMapBackdrop = document.getElementById("scanMapBackdrop");
 const scanMapClose = document.getElementById("scanMapClose");
@@ -70,6 +71,8 @@ const scanMapSearch = document.getElementById("scanMapSearch");
 const scanMapKind = document.getElementById("scanMapKind");
 const scanMapBucket = document.getElementById("scanMapBucket");
 const scanMapSeverity = document.getElementById("scanMapSeverity");
+const scanMapConfidence = document.getElementById("scanMapConfidence");
+const scanMapFocus = document.getElementById("scanMapFocus");
 const scanMapSvg = document.getElementById("scanMapSvg");
 const scanMapViewport = document.getElementById("scanMapViewport");
 const scanMapDetails = document.getElementById("scanMapDetails");
@@ -101,6 +104,7 @@ let authorizationResolve = null;
 let scanCancelled = false;
 let drawerReturnFocus = null;
 let mapScanData = null;
+let mapGraph = null;
 let mapView = "surface";
 let mapScale = 1;
 let mapPanX = 0;
@@ -108,6 +112,11 @@ let mapPanY = 0;
 let mapDragging = false;
 let mapPointer = null;
 let mapReturnFocus = null;
+let mapSelectedNodeId = null;
+let mapFocusMode = true;
+let mapBaseStatus = "No map loaded";
+const mapScaleMin = 0.45;
+const mapScaleMax = 24;
 
 if (brandVersion) {
   brandVersion.textContent = "v" + chrome.runtime.getManifest().version;
@@ -358,6 +367,7 @@ function openFindingDrawer(fingerprint) {
     });
   }
   if (showAffectedBtn) showAffectedBtn.hidden = !finding.selector;
+  if (showFindingMapBtn) showFindingMapBtn.hidden = !lastScanData;
   findingDrawer.hidden = false;
   if (findingDrawerClose && typeof findingDrawerClose.focus === "function") findingDrawerClose.focus();
 }
@@ -396,8 +406,11 @@ function closeScanMap() {
   if (!scanMapDialog) return;
   scanMapDialog.hidden = true;
   mapScanData = null;
+  mapGraph = null;
   mapDragging = false;
   mapPointer = null;
+  mapSelectedNodeId = null;
+  if (scanMapViewport) scanMapViewport.classList.remove("dragging");
   if (mapReturnFocus && typeof mapReturnFocus.focus === "function") mapReturnFocus.focus();
   mapReturnFocus = null;
 }
@@ -415,9 +428,72 @@ function resetMapTransform() {
   applyMapTransform();
 }
 
+function mapPoint(clientX, clientY) {
+  if (scanMapSvg && typeof scanMapSvg.createSVGPoint === "function" && typeof scanMapSvg.getScreenCTM === "function") {
+    const matrix = scanMapSvg.getScreenCTM();
+    if (matrix && typeof matrix.inverse === "function") {
+      const point = scanMapSvg.createSVGPoint();
+      point.x = clientX;
+      point.y = clientY;
+      return point.matrixTransform(matrix.inverse());
+    }
+  }
+  const bounds = scanMapViewport && typeof scanMapViewport.getBoundingClientRect === "function" ? scanMapViewport.getBoundingClientRect() : { left: 0, top: 0, width: 1, height: 1 };
+  const viewBox = scanMapSvg && scanMapSvg.viewBox && scanMapSvg.viewBox.baseVal;
+  return {
+    x: (clientX - (bounds.left || 0)) * (viewBox && bounds.width ? viewBox.width / bounds.width : 1),
+    y: (clientY - (bounds.top || 0)) * (viewBox && bounds.height ? viewBox.height / bounds.height : 1)
+  };
+}
+
+function setMapScale(value, anchor) {
+  const next = Math.max(mapScaleMin, Math.min(mapScaleMax, value));
+  if (next === mapScale) return;
+  if (anchor) {
+    const contentX = (anchor.x - mapPanX) / mapScale;
+    const contentY = (anchor.y - mapPanY) / mapScale;
+    mapPanX = anchor.x - contentX * next;
+    mapPanY = anchor.y - contentY * next;
+  }
+  mapScale = next;
+  applyMapTransform();
+}
+
+function centerMapNode(node) {
+  if (!node || !scanMapSvg) return;
+  const viewBox = scanMapSvg.viewBox && scanMapSvg.viewBox.baseVal;
+  const bounds = scanMapViewport && typeof scanMapViewport.getBoundingClientRect === "function" ? scanMapViewport.getBoundingClientRect() : null;
+  if (!viewBox) return;
+  if (bounds && bounds.width && bounds.height) {
+    const baseScale = Math.min(bounds.width / Math.max(1, viewBox.width), bounds.height / Math.max(1, viewBox.height));
+    const readableScale = 235 / Math.max(1, node.width * baseScale);
+    mapScale = Math.max(mapScale, Math.min(mapScaleMax, readableScale));
+  }
+  mapPanX = viewBox.width / 2 - (node.x + node.width / 2) * mapScale;
+  mapPanY = viewBox.height / 2 - (node.y + node.height / 2) * mapScale;
+  applyMapTransform();
+}
+
 function mapCoverage(node) {
   if (!mapScanData || node.kind !== "check") return null;
   return (mapScanData.coverage || []).find(function (entry) { return entry.checkId === node.checkId; }) || null;
+}
+
+function mapBreadcrumb(node) {
+  if (!mapGraph || !node) return "";
+  const selected = VulnscanMap.trace(mapGraph, node.id);
+  return '<div class="map-breadcrumb" aria-label="Evidence path">' + selected.breadcrumb.map(function (item) {
+    return "<span>" + escapeHtml(item.label) + "</span>";
+  }).join("") + "</div>";
+}
+
+function updateMapSelection(node, center) {
+  if (!mapGraph || !scanMapSvg || !node) return;
+  mapSelectedNodeId = node.id;
+  const selected = VulnscanMap.highlight(scanMapSvg, mapGraph, node.id, mapFocusMode);
+  renderMapDetails(node);
+  if (scanMapStatus) scanMapStatus.textContent = mapBaseStatus + " · " + selected.nodeIds.length + " nodes in path";
+  if (center) centerMapNode(node);
 }
 
 function renderMapDetails(node) {
@@ -426,9 +502,13 @@ function renderMapDetails(node) {
     const finding = node.data;
     const guidance = VulnscanGuidance.get(finding);
     const current = lastScanData && mapScanData && lastScanData.scanId === mapScanData.scanId;
-    scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(finding.bucket) + " · " + escapeHtml(finding.severity) + '</div><h3>' + escapeHtml(finding.type) + '</h3>' +
+    const actions = '<div class="map-detail-actions"><button class="btn ghost map-center-node">Centre node</button>' +
+      (current ? '<button class="btn primary map-investigate" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Open investigation</button>' : "") + "</div>";
+    scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(finding.bucket) + " · " + escapeHtml(finding.severity) + " · " + escapeHtml(finding.confidence) + ' confidence</div><h3>' + escapeHtml(finding.type) + '</h3>' + mapBreadcrumb(node) +
       '<p>' + escapeHtml(finding.detail) + '</p><dl><dt>Evidence</dt><dd>' + escapeHtml(finding.evidence || "No additional evidence recorded.") + '</dd><dt>Exploitability</dt><dd>' + escapeHtml(guidance.exploitability.plainLanguage) + '</dd><dt>Affected location</dt><dd>' + escapeHtml(finding.location || "Not recorded") + '</dd><dt>Stage</dt><dd>' + escapeHtml(sourceLabel(finding.source)) + '</dd></dl>' +
-      (current ? '<button class="btn primary map-investigate" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Open investigation</button>' : '<p class="map-readonly">Historical map — investigation details are read-only.</p>');
+      actions + (current ? "" : '<p class="map-readonly">Historical map — investigation details are read-only.</p>');
+    const center = scanMapDetails.querySelector(".map-center-node");
+    if (center) center.addEventListener("click", function () { centerMapNode(node); });
     const investigate = scanMapDetails.querySelector(".map-investigate");
     if (investigate) investigate.addEventListener("click", function () {
       const fingerprint = investigate.getAttribute("data-fingerprint");
@@ -439,36 +519,54 @@ function renderMapDetails(node) {
   }
   const coverage = mapCoverage(node);
   const detail = node.detail || node.kind;
-  scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(categoryLabel(node.kind)) + '</div><h3>' + escapeHtml(node.label) + '</h3><p>' + escapeHtml(detail) + '</p><dl>' +
+  scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(categoryLabel(node.kind)) + '</div><h3>' + escapeHtml(node.label) + '</h3>' + mapBreadcrumb(node) + '<p>' + escapeHtml(detail) + '</p><dl>' +
     (node.location ? '<dt>Location</dt><dd>' + escapeHtml(node.location) + '</dd>' : "") +
     (node.occurrences ? '<dt>Occurrences</dt><dd>' + Number(node.occurrences) + '</dd>' : "") +
     (node.status ? '<dt>Status</dt><dd>' + escapeHtml(node.status) + '</dd>' : "") +
     (coverage ? '<dt>Coverage</dt><dd>' + escapeHtml(coverage.status) + ' · ' + coverage.inspected + ' inspected · ' + coverage.matched + ' matched</dd>' : "") +
-    '</dl>';
+    '</dl><div class="map-detail-actions"><button class="btn ghost map-center-node">Centre node</button></div>';
+  const center = scanMapDetails.querySelector(".map-center-node");
+  if (center) center.addEventListener("click", function () { centerMapNode(node); });
 }
 
-function renderScanMap() {
+function renderScanMap(options) {
   if (!mapScanData || !scanMapSvg) return;
-  const graph = VulnscanMap.build(mapScanData, mapView, {
+  mapGraph = VulnscanMap.build(mapScanData, mapView, {
     query: scanMapSearch ? scanMapSearch.value : "",
     kind: scanMapKind ? scanMapKind.value : "all",
     bucket: scanMapBucket ? scanMapBucket.value : "all",
-    severity: scanMapSeverity ? scanMapSeverity.value : "all"
+    severity: scanMapSeverity ? scanMapSeverity.value : "all",
+    confidence: scanMapConfidence ? scanMapConfidence.value : "all"
   });
-  VulnscanMap.render(scanMapSvg, graph, renderMapDetails);
-  resetMapTransform();
-  if (scanMapDetails) scanMapDetails.innerHTML = '<div class="empty-hint">Select a map node to inspect it.</div>';
+  VulnscanMap.render(scanMapSvg, mapGraph, {
+    select: function (node) { updateMapSelection(node, false); },
+    center: function (node) { updateMapSelection(node, true); }
+  });
+  if (options && options.resetView) resetMapTransform();
+  else applyMapTransform();
+  const selected = mapGraph.nodes.find(function (node) { return node.id === mapSelectedNodeId; });
+  if (selected) updateMapSelection(selected, false);
+  else {
+    mapSelectedNodeId = null;
+    if (scanMapDetails) scanMapDetails.innerHTML = '<div class="empty-hint">Select a node to inspect its evidence path.</div>';
+  }
   if (scanMapStatus) {
-    const notice = mapView === "surface" && !graph.available ? " · no structured surface data" : graph.truncated ? " · collection limit reached" : graph.overflow ? " · " + graph.overflow + " nodes summarized" : "";
-    scanMapStatus.textContent = graph.nodes.length + " nodes · " + graph.edges.length + " relationships" + notice;
+    const notice = mapView === "surface" && !mapGraph.available ? " · no structured surface data" : mapGraph.truncated ? " · collection limit reached" : mapGraph.overflow ? " · " + mapGraph.overflow + " nodes summarized" : "";
+    mapBaseStatus = mapGraph.nodes.length + " nodes · " + mapGraph.edges.length + " relationships" + notice;
+    scanMapStatus.textContent = mapBaseStatus;
+    if (selected) {
+      const path = VulnscanMap.trace(mapGraph, selected.id);
+      scanMapStatus.textContent += " · " + path.nodeIds.length + " nodes in path";
+    }
   }
   if (scanMapKind) scanMapKind.disabled = mapView !== "surface";
 }
 
-function openScanMap(scan, returnFocus) {
+function openScanMap(scan, returnFocus, selectedNodeId) {
   const normalized = normalizeScan(scan);
   if (!normalized || !scanMapDialog) return;
   mapScanData = normalized;
+  mapSelectedNodeId = selectedNodeId || null;
   mapReturnFocus = returnFocus || document.activeElement || null;
   mapView = normalized.surface.nodes.some(function (node) { return node.kind !== "target"; }) ? "surface" : "flow";
   document.querySelectorAll(".scan-map-view").forEach(function (button) {
@@ -479,8 +577,13 @@ function openScanMap(scan, returnFocus) {
   if (scanMapKind) scanMapKind.value = "all";
   if (scanMapBucket) scanMapBucket.value = "all";
   if (scanMapSeverity) scanMapSeverity.value = "all";
+  if (scanMapConfidence) scanMapConfidence.value = "all";
   scanMapDialog.hidden = false;
-  renderScanMap();
+  renderScanMap({ resetView: true });
+  if (mapSelectedNodeId && mapGraph) {
+    const selected = mapGraph.nodes.find(function (node) { return node.id === mapSelectedNodeId; });
+    if (selected) updateMapSelection(selected, true);
+  }
   if (scanMapClose) scanMapClose.focus();
 }
 
@@ -1642,6 +1745,7 @@ function applyFilter() {
       '<span class="finding-title">' + escapeHtml(finding.type) + "</span>" + occurrences + changeBadge +
       '<span class="triage-badge ' + escapeHtml(workflow) + '">' + escapeHtml(triageLabel(workflow)) + "</span>" +
       '<button class="inspect-btn" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Investigate</button>' +
+      '<button class="map-btn" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Map</button>' +
       '<button class="copy-btn" data-idx="' + index + '">Copy</button></div>' +
       '<div class="detail">' + escapeHtml(finding.detail) + "</div>" +
       '<details class="finding-context"><summary>Evidence &amp; verification</summary>' +
@@ -1669,6 +1773,12 @@ function applyFilter() {
   resultsEl.querySelectorAll(".inspect-btn").forEach(function (button) {
     button.addEventListener("click", function () {
       openFindingDrawer(button.getAttribute("data-fingerprint"));
+    });
+  });
+  resultsEl.querySelectorAll(".map-btn").forEach(function (button) {
+    button.addEventListener("click", function () {
+      if (!lastScanData) return;
+      openScanMap(lastScanData, button, "map-finding-" + button.getAttribute("data-fingerprint"));
     });
   });
 }
@@ -2164,7 +2274,7 @@ function buildMarkdownReport(scan) {
 
 function buildJsonReport(scan) {
   return {
-    reportVersion: "6.2",
+    reportVersion: "6.3",
     schemaVersion: 8,
     url: scan.url,
     scanId: scan.scanId,
@@ -2405,6 +2515,15 @@ if (showAffectedBtn) {
     });
   });
 }
+if (showFindingMapBtn) {
+  showFindingMapBtn.addEventListener("click", function () {
+    const finding = findingByFingerprint(activeFindingFingerprint);
+    if (!finding || !lastScanData) return;
+    const returnFocus = drawerReturnFocus || showFindingMapBtn;
+    closeFindingDrawer();
+    openScanMap(lastScanData, returnFocus, "map-finding-" + finding.fingerprint);
+  });
+}
 
 if (clearAllDataBtn) {
   clearAllDataBtn.addEventListener("click", function () {
@@ -2450,65 +2569,82 @@ document.querySelectorAll(".scan-map-view").forEach(function (button) {
     document.querySelectorAll(".scan-map-view").forEach(function (item) {
       item.classList.toggle("active", item === button);
     });
-    renderScanMap();
+    renderScanMap({ resetView: true });
   });
 });
-[scanMapSearch, scanMapKind, scanMapBucket, scanMapSeverity].forEach(function (control) {
+[scanMapSearch, scanMapKind, scanMapBucket, scanMapSeverity, scanMapConfidence].forEach(function (control) {
   if (!control) return;
   control.addEventListener(control === scanMapSearch ? "input" : "change", renderScanMap);
 });
 if (scanMapClose) scanMapClose.addEventListener("click", closeScanMap);
 if (scanMapBackdrop) scanMapBackdrop.addEventListener("click", closeScanMap);
 if (scanMapZoomIn) scanMapZoomIn.addEventListener("click", function () {
-  mapScale = Math.min(2.5, mapScale + 0.15);
-  applyMapTransform();
+  const bounds = scanMapViewport.getBoundingClientRect();
+  setMapScale(mapScale * 1.2, mapPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2));
 });
 if (scanMapZoomOut) scanMapZoomOut.addEventListener("click", function () {
-  mapScale = Math.max(0.45, mapScale - 0.15);
-  applyMapTransform();
+  const bounds = scanMapViewport.getBoundingClientRect();
+  setMapScale(mapScale / 1.2, mapPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2));
 });
 if (scanMapFit) scanMapFit.addEventListener("click", resetMapTransform);
+if (scanMapFocus) scanMapFocus.addEventListener("click", function () {
+  mapFocusMode = !mapFocusMode;
+  scanMapFocus.classList.toggle("active", mapFocusMode);
+  scanMapFocus.setAttribute("aria-pressed", mapFocusMode ? "true" : "false");
+  if (mapGraph && scanMapSvg && mapSelectedNodeId) VulnscanMap.highlight(scanMapSvg, mapGraph, mapSelectedNodeId, mapFocusMode);
+});
 if (scanMapReset) scanMapReset.addEventListener("click", function () {
   mapView = mapScanData && mapScanData.surface.nodes.some(function (node) { return node.kind !== "target"; }) ? "surface" : "flow";
   if (scanMapSearch) scanMapSearch.value = "";
   if (scanMapKind) scanMapKind.value = "all";
   if (scanMapBucket) scanMapBucket.value = "all";
   if (scanMapSeverity) scanMapSeverity.value = "all";
+  if (scanMapConfidence) scanMapConfidence.value = "all";
+  mapSelectedNodeId = null;
+  mapFocusMode = true;
+  if (scanMapFocus) {
+    scanMapFocus.classList.add("active");
+    scanMapFocus.setAttribute("aria-pressed", "true");
+  }
   document.querySelectorAll(".scan-map-view").forEach(function (button) {
     button.classList.toggle("active", button.getAttribute("data-map-view") === mapView);
   });
-  renderScanMap();
+  renderScanMap({ resetView: true });
 });
 if (scanMapViewport) {
   scanMapViewport.addEventListener("wheel", function (event) {
     event.preventDefault();
-    mapScale = Math.max(0.45, Math.min(2.5, mapScale + (event.deltaY < 0 ? 0.12 : -0.12)));
-    applyMapTransform();
+    const anchor = mapPoint(event.clientX, event.clientY);
+    setMapScale(mapScale * (event.deltaY < 0 ? 1.12 : 1 / 1.12), anchor);
   }, { passive: false });
   scanMapViewport.addEventListener("pointerdown", function (event) {
-    if (event.button !== 0) return;
-    mapDragging = true;
-    mapPointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
-    scanMapViewport.classList.add("dragging");
+    if (event.button !== 0 || !VulnscanMap.canPanFrom(event.target)) return;
+    const point = mapPoint(event.clientX, event.clientY);
+    mapPointer = { id: event.pointerId, startX: event.clientX, startY: event.clientY, x: point.x, y: point.y };
     if (typeof scanMapViewport.setPointerCapture === "function") scanMapViewport.setPointerCapture(event.pointerId);
   });
   scanMapViewport.addEventListener("pointermove", function (event) {
-    if (!mapDragging || !mapPointer || event.pointerId !== mapPointer.id) return;
-    const bounds = typeof scanMapViewport.getBoundingClientRect === "function" ? scanMapViewport.getBoundingClientRect() : { width: 1, height: 1 };
-    const viewBox = scanMapSvg && scanMapSvg.viewBox && scanMapSvg.viewBox.baseVal;
-    const ratioX = viewBox && bounds.width ? viewBox.width / bounds.width : 1;
-    const ratioY = viewBox && bounds.height ? viewBox.height / bounds.height : 1;
-    mapPanX += (event.clientX - mapPointer.x) * ratioX;
-    mapPanY += (event.clientY - mapPointer.y) * ratioY;
-    mapPointer.x = event.clientX;
-    mapPointer.y = event.clientY;
+    if (!mapPointer || event.pointerId !== mapPointer.id) return;
+    if (!mapDragging && Math.hypot(event.clientX - mapPointer.startX, event.clientY - mapPointer.startY) < 5) return;
+    if (!mapDragging) {
+      mapDragging = true;
+      scanMapViewport.classList.add("dragging");
+    }
+    const point = mapPoint(event.clientX, event.clientY);
+    mapPanX += point.x - mapPointer.x;
+    mapPanY += point.y - mapPointer.y;
+    mapPointer.x = point.x;
+    mapPointer.y = point.y;
     applyMapTransform();
   });
   const stopMapDrag = function (event) {
-    if (!mapDragging || (mapPointer && event.pointerId !== mapPointer.id)) return;
+    if (!mapPointer || event.pointerId !== mapPointer.id) return;
     mapDragging = false;
     mapPointer = null;
     scanMapViewport.classList.remove("dragging");
+    if (typeof scanMapViewport.releasePointerCapture === "function" && scanMapViewport.hasPointerCapture && scanMapViewport.hasPointerCapture(event.pointerId)) {
+      scanMapViewport.releasePointerCapture(event.pointerId);
+    }
   };
   scanMapViewport.addEventListener("pointerup", stopMapDrag);
   scanMapViewport.addEventListener("pointercancel", stopMapDrag);
@@ -2534,7 +2670,7 @@ chrome.storage.local.get("lastScan", function (data) {
   if (!data.lastScan) return;
   if (!renderFindings(data.lastScan)) {
     chrome.storage.local.remove("lastScan", function () {
-      setStatus("This saved result needs a fresh v6.2 scan — the incompatible cache was cleared");
+      setStatus("This saved result needs a fresh v6.3 scan — the incompatible cache was cleared");
     });
   }
 });

@@ -115,7 +115,7 @@ function createDashboard() {
     runtime: {
       lastError: null,
       getURL: function (value) { return "chrome-extension://test/" + (value || ""); },
-      getManifest: function () { return { version: "6.2.0" }; },
+      getManifest: function () { return { version: "6.3.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -625,7 +625,7 @@ test("redacted reports never include raw secret values", function () {
   dashboard.setExportSecrets({ secrets: [raw], available: true });
   assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
   assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
-  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.2");
+  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.3");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
 
   dashboard.element("exportSecretsBtn").listeners.click();

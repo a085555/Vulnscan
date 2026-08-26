@@ -55,3 +55,30 @@ test("scan flow maps selected checks and supports result filters", function () {
   const searched = map.build(sampleScan(), "surface", { query: "account" });
   assert.equal(searched.nodes.some(function (node) { return node.kind === "route"; }), true);
 });
+
+test("confidence filter and coverage status are represented in the graph", function () {
+  const filtered = map.build(sampleScan(), "surface", { confidence: "low" });
+  assert.equal(filtered.nodes.some(function (node) { return node.kind === "finding"; }), false);
+  const flow = map.build(sampleScan(), "flow", {});
+  const cors = flow.nodes.find(function (node) { return node.checkId === "safe.cors"; });
+  assert.equal(cors.status, "complete");
+  assert.equal(cors.subtitle, "complete");
+});
+
+test("selection trace follows the evidence path and includes direct relationships", function () {
+  const graph = map.build(sampleScan(), "surface", {});
+  const route = graph.nodes.find(function (node) { return node.kind === "route"; });
+  const finding = graph.nodes.find(function (node) { return node.kind === "finding"; });
+  const findingTrace = map.trace(graph, finding.id);
+  assert.deepEqual(findingTrace.breadcrumb.map(function (node) { return node.kind; }), ["target", "group", "route", "finding"]);
+  assert.equal(findingTrace.edgeIndexes.length, 3);
+  const routeTrace = map.trace(graph, route.id);
+  assert.equal(routeTrace.nodeIds.includes(finding.id), true);
+  assert.equal(routeTrace.nodeIds.includes("map-target"), true);
+});
+
+test("map panning starts on the canvas but never on a node", function () {
+  assert.equal(map.canPanFrom({ closest: function () { return {}; } }), false);
+  assert.equal(map.canPanFrom({ closest: function () { return null; } }), true);
+  assert.equal(map.canPanFrom(null), true);
+});
