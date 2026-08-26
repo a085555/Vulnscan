@@ -35,6 +35,19 @@
     }, options.query);
   }
 
+  function findingStage(finding) {
+    if (finding.source === "headers") return "headers";
+    if (finding.source === "safe-active" || finding.source === "active") return "safe";
+    if (finding.source === "lab") return "lab";
+    return "passive";
+  }
+
+  function changeDetail(current, previous) {
+    if (!current || !previous) return [];
+    const fields = ["severity", "confidence", "bucket", "type", "detail", "evidence", "verification", "location", "occurrences"];
+    return fields.filter(function (field) { return text(current[field]) !== text(previous[field]); });
+  }
+
   function targetNode(scan) {
     let label = scan.url || "Selected target";
     try { label = new URL(scan.url).hostname || label; } catch (e) {}
@@ -187,6 +200,151 @@
     return capped;
   }
 
+  function surfaceComparison(current, previous) {
+    const currentNodes = VulnscanFindings.normalizeSurface(current.surface).nodes.filter(function (node) { return node.kind !== "target"; });
+    const previousNodes = VulnscanFindings.normalizeSurface(previous.surface).nodes.filter(function (node) { return node.kind !== "target"; });
+    const currentById = new Map(currentNodes.map(function (node) { return [node.id, node]; }));
+    const previousById = new Map(previousNodes.map(function (node) { return [node.id, node]; }));
+    const result = { new: [], changed: [], resolved: [], unchanged: [] };
+    currentNodes.forEach(function (node) {
+      const old = previousById.get(node.id);
+      if (!old) result.new.push({ current: node, previous: null });
+      else if (["label", "detail", "location", "external", "occurrences"].some(function (field) { return text(node[field]) !== text(old[field]); })) {
+        result.changed.push({ current: node, previous: old });
+      } else result.unchanged.push({ current: node, previous: old });
+    });
+    previousNodes.forEach(function (node) {
+      if (!currentById.has(node.id)) result.resolved.push({ current: null, previous: node });
+    });
+    return result;
+  }
+
+  function comparisonGraph(current, previous, filters) {
+    const options = Object.assign({ query: "", bucket: "all", severity: "all", confidence: "all", kind: "all", change: "all", comparableStages: ["passive", "headers", "safe", "lab"] }, filters || {});
+    options.query = text(options.query).trim().toLowerCase();
+    const stages = Array.isArray(options.comparableStages) ? options.comparableStages : ["passive", "headers", "safe", "lab"];
+    const currentFindings = (current.findings || []).filter(function (finding) { return stages.includes(findingStage(finding)); });
+    const previousFindings = (previous.findings || []).filter(function (finding) { return stages.includes(findingStage(finding)); });
+    const findingComparison = VulnscanFindings.compare(currentFindings, previousFindings);
+    const surface = stages.includes("passive") ? surfaceComparison(current, previous) : { new: [], changed: [], resolved: [], unchanged: [] };
+    const nodes = [targetNode(current)];
+    const edges = [];
+    const groups = new Map();
+    const statuses = ["new", "changed", "resolved", "unchanged"];
+
+    function group(status) {
+      if (groups.has(status)) return groups.get(status);
+      const id = "map-change-group-" + status;
+      groups.set(status, id);
+      nodes.push({ id: id, kind: "group", change: status, label: status.charAt(0).toUpperCase() + status.slice(1), detail: "Comparison group", depth: 1 });
+      edges.push({ from: "map-target", to: id, relation: "compared as" });
+      return id;
+    }
+
+    statuses.forEach(function (status) {
+      if (options.change !== "all" && options.change !== status) return;
+      surface[status].forEach(function (pair) {
+        const node = pair.current || pair.previous;
+        if (options.kind !== "all" && node.kind !== options.kind) return;
+        if (!matches(node, options.query)) return;
+        const id = "map-change-surface-" + status + "-" + node.id;
+        nodes.push({
+          id: id,
+          surfaceId: node.id,
+          kind: node.kind,
+          surfaceKind: node.kind,
+          change: status,
+          label: node.label,
+          detail: node.detail || node.location || node.kind,
+          subtitle: status + " · " + node.kind,
+          location: node.location,
+          depth: 2,
+          data: node,
+          previous: pair.previous
+        });
+        edges.push({ from: group(status), to: id, relation: status });
+      });
+    });
+
+    function addFinding(status, finding, previousFinding) {
+      if (options.change !== "all" && options.change !== status) return;
+      if (!findingAllowed(finding, options)) return;
+      const id = "map-change-finding-" + status + "-" + finding.identityFingerprint;
+      nodes.push({
+        id: id,
+        kind: "finding",
+        change: status,
+        label: finding.type,
+        detail: finding.detail,
+        subtitle: status + " · " + finding.severity,
+        location: finding.location,
+        severity: finding.severity,
+        bucket: finding.bucket,
+        depth: 3,
+        data: finding,
+        previous: previousFinding || null,
+        changedFields: changeDetail(finding, previousFinding),
+        resolved: status === "resolved"
+      });
+      edges.push({ from: group(status), to: id, relation: status });
+    }
+
+    findingComparison.new.forEach(function (finding) { addFinding("new", finding, null); });
+    findingComparison.changed.forEach(function (pair) { addFinding("changed", pair.current, pair.previous); });
+    findingComparison.resolved.forEach(function (finding) { addFinding("resolved", finding, null); });
+    findingComparison.unchanged.forEach(function (finding) { addFinding("unchanged", finding, finding); });
+
+    const capped = capGraph(nodes, edges);
+    capped.available = true;
+    capped.truncated = false;
+    capped.comparison = {
+      findings: statuses.reduce(function (counts, status) { counts[status] = findingComparison[status].length; return counts; }, {}),
+      surface: statuses.reduce(function (counts, status) { counts[status] = surface[status].length; return counts; }, {})
+    };
+    return capped;
+  }
+
+  function collapseGraph(graph, collapsedIds) {
+    const collapsed = new Set(Array.isArray(collapsedIds) ? collapsedIds : []);
+    if (!collapsed.size) return graph;
+    const outgoing = new Map();
+    graph.edges.forEach(function (edge) {
+      if (!outgoing.has(edge.from)) outgoing.set(edge.from, []);
+      outgoing.get(edge.from).push(edge.to);
+    });
+    const reachable = new Set(["map-target"]);
+    const queue = ["map-target"];
+    while (queue.length) {
+      const id = queue.shift();
+      if (collapsed.has(id)) continue;
+      (outgoing.get(id) || []).forEach(function (child) {
+        if (reachable.has(child)) return;
+        reachable.add(child);
+        queue.push(child);
+      });
+    }
+    const nodes = graph.nodes.filter(function (node) { return reachable.has(node.id); });
+    nodes.forEach(function (node) {
+      if (!collapsed.has(node.id)) return;
+      const descendants = new Set();
+      const pending = (outgoing.get(node.id) || []).slice();
+      while (pending.length) {
+        const id = pending.shift();
+        if (descendants.has(id)) continue;
+        descendants.add(id);
+        pending.push.apply(pending, outgoing.get(id) || []);
+      }
+      node.collapsed = true;
+      node.hiddenCount = Array.from(descendants).filter(function (id) { return !reachable.has(id); }).length;
+      node.subtitle = node.hiddenCount + " nodes hidden";
+    });
+    const ids = new Set(nodes.map(function (node) { return node.id; }));
+    return Object.assign({}, graph, {
+      nodes: nodes,
+      edges: graph.edges.filter(function (edge) { return ids.has(edge.from) && ids.has(edge.to) && !collapsed.has(edge.from); })
+    });
+  }
+
   function layout(graph) {
     const columns = new Map();
     const incoming = new Map();
@@ -227,6 +385,7 @@
       overflow: graph.overflow,
       available: graph.available,
       truncated: graph.truncated,
+      comparison: graph.comparison || null,
       width: Math.max(320, (Math.max.apply(null, graph.nodes.map(function (node) { return node.depth || 0; })) + 1) * 275),
       height: Math.max(180, maxHeight + 40)
     };
@@ -235,7 +394,12 @@
   function build(scan, view, filters) {
     const options = Object.assign({ query: "", bucket: "all", severity: "all", confidence: "all", kind: "all" }, filters || {});
     options.query = text(options.query).trim().toLowerCase();
-    return layout(view === "flow" ? flowGraph(scan, options) : surfaceGraph(scan, options));
+    return layout(collapseGraph(view === "flow" ? flowGraph(scan, options) : surfaceGraph(scan, options), options.collapsed));
+  }
+
+  function buildComparison(current, previous, filters) {
+    const options = Object.assign({}, filters || {});
+    return layout(collapseGraph(comparisonGraph(current, previous, options), options.collapsed));
   }
 
   function createSvg(name) {
@@ -323,13 +487,14 @@
     });
     graph.nodes.forEach(function (node) {
       const group = createSvg("g");
-      group.setAttribute("class", "scan-map-node " + node.kind + (node.severity ? " " + node.severity : "") + (node.bucket ? " " + node.bucket : "") + (node.status ? " status-" + node.status : ""));
+      group.setAttribute("class", "scan-map-node " + node.kind + (node.severity ? " " + node.severity : "") + (node.bucket ? " " + node.bucket : "") + (node.status ? " status-" + node.status : "") + (node.change ? " change-" + node.change : "") + (node.collapsed ? " collapsed" : ""));
       group.setAttribute("transform", "translate(" + node.x + " " + node.y + ")");
       group.setAttribute("data-node-id", node.id);
       group.setAttribute("tabindex", "0");
       group.setAttribute("role", "button");
       group.setAttribute("aria-label", node.label);
       group.setAttribute("aria-pressed", "false");
+      if (node.kind === "group" || node.kind === "stage") group.setAttribute("aria-expanded", node.collapsed ? "false" : "true");
       const halo = createSvg("rect");
       halo.setAttribute("class", "scan-map-node-halo");
       halo.setAttribute("width", node.width);
@@ -352,7 +517,7 @@
       subtitle.setAttribute("x", "13");
       subtitle.setAttribute("y", "43");
       subtitle.setAttribute("class", "scan-map-node-subtitle");
-      subtitle.textContent = node.kind === "finding" ? text(node.bucket) + " · " + text(node.severity) : text(node.subtitle || node.detail || node.kind).slice(0, 38);
+      subtitle.textContent = text(node.subtitle || (node.kind === "finding" ? text(node.bucket) + " · " + text(node.severity) : node.detail || node.kind)).slice(0, 38);
       group.appendChild(subtitle);
       const select = function () { if (typeof callbacks.select === "function") callbacks.select(node); };
       group.addEventListener("click", select);
@@ -390,9 +555,74 @@
     return layer;
   }
 
+  function renderMiniMap(svg, graph) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    svg.setAttribute("viewBox", "0 0 " + graph.width + " " + graph.height);
+    graph.nodes.forEach(function (node) {
+      const rect = createSvg("rect");
+      rect.setAttribute("x", node.x);
+      rect.setAttribute("y", node.y);
+      rect.setAttribute("width", node.width);
+      rect.setAttribute("height", node.height);
+      rect.setAttribute("rx", "5");
+      rect.setAttribute("data-node-id", node.id);
+      rect.setAttribute("class", "scan-map-mini-node " + node.kind + (node.change ? " change-" + node.change : ""));
+      svg.appendChild(rect);
+    });
+    const windowRect = createSvg("rect");
+    windowRect.setAttribute("class", "scan-map-mini-window");
+    svg.appendChild(windowRect);
+  }
+
+  function updateMiniMap(svg, graph, transform, selectedId) {
+    if (!svg || !graph) return;
+    const scale = Math.max(0.01, Number(transform.scale) || 1);
+    const windowRect = svg.querySelector(".scan-map-mini-window");
+    if (windowRect) {
+      windowRect.setAttribute("x", Math.max(0, -(Number(transform.x) || 0) / scale));
+      windowRect.setAttribute("y", Math.max(0, -(Number(transform.y) || 0) / scale));
+      windowRect.setAttribute("width", Math.min(graph.width, graph.width / scale));
+      windowRect.setAttribute("height", Math.min(graph.height, graph.height / scale));
+    }
+    svg.querySelectorAll(".scan-map-mini-node").forEach(function (node) {
+      node.classList.toggle("selected", node.getAttribute("data-node-id") === selectedId);
+    });
+  }
+
+  function xml(value) {
+    return text(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function exportSvg(graph) {
+    const byId = new Map(graph.nodes.map(function (node) { return [node.id, node]; }));
+    const edges = graph.edges.map(function (edge) {
+      const from = byId.get(edge.from);
+      const to = byId.get(edge.to);
+      if (!from || !to) return "";
+      const startX = from.x + from.width;
+      const startY = from.y + from.height / 2;
+      const endX = to.x;
+      const endY = to.y + to.height / 2;
+      const middle = startX + Math.max(30, (endX - startX) / 2);
+      return '<path d="M' + startX + " " + startY + " C" + middle + " " + startY + " " + middle + " " + endY + " " + endX + " " + endY + '" fill="none" stroke="#405776" stroke-width="1.4"/>';
+    }).join("");
+    const colors = { target: "#173557", finding: "#2e1921", group: "#17273d", stage: "#17273d" };
+    const nodes = graph.nodes.map(function (node) {
+      const fill = colors[node.kind] || "#152132";
+      const stroke = node.change === "new" ? "#64b5f6" : node.change === "changed" ? "#e9b44c" : node.change === "resolved" ? "#61c98b" : node.kind === "finding" ? "#d95d75" : "#55759e";
+      const subtitle = text(node.subtitle || (node.kind === "finding" ? node.bucket + " · " + node.severity : node.detail || node.kind)).slice(0, 42);
+      return '<g transform="translate(' + node.x + " " + node.y + ')"><rect width="' + node.width + '" height="' + node.height + '" rx="9" fill="' + fill + '" stroke="' + stroke + '"/><text x="13" y="24" fill="#dce7f5" font-family="Arial,sans-serif" font-size="11" font-weight="600">' + xml(text(node.label).slice(0, 36)) + '</text><text x="13" y="43" fill="#8ea1ba" font-family="monospace" font-size="9">' + xml(subtitle) + "</text></g>";
+    }).join("");
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + graph.width + " " + graph.height + '" width="' + graph.width + '" height="' + graph.height + '"><rect width="100%" height="100%" fill="#09101a"/>' + edges + nodes + "</svg>";
+  }
+
   root.VulnscanMap = {
     build: build,
+    buildComparison: buildComparison,
     render: render,
+    renderMiniMap: renderMiniMap,
+    updateMiniMap: updateMiniMap,
+    exportSvg: exportSvg,
     trace: trace,
     highlight: highlight,
     canPanFrom: canPanFrom

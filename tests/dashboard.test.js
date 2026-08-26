@@ -115,7 +115,7 @@ function createDashboard() {
     runtime: {
       lastError: null,
       getURL: function (value) { return "chrome-extension://test/" + (value || ""); },
-      getManifest: function () { return { version: "6.3.0" }; },
+      getManifest: function () { return { version: "6.4.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -561,6 +561,15 @@ test("compares with the previous scan using the same target and check profile", 
   dashboard.element("changeFilter").listeners.change();
   assert.match(dashboard.element("results").innerHTML, /New issue/);
   assert.doesNotMatch(dashboard.element("results").innerHTML, /Common/);
+  const comparison = model.compare([common, added], [common, resolved]);
+  const report = dashboard.context.buildComparisonMarkdown(
+    dashboard.context.normalizeScan(Object.assign({}, base, { scanId: "current", timestamp: 20, findings: [common, added] })),
+    dashboard.context.normalizeScan(Object.assign({}, base, { scanId: "previous", timestamp: 10, findings: [common, resolved] })),
+    { comparison: comparison, comparableStages: ["passive"] }
+  );
+  assert.match(report, /1 new · 0 changed · 1 resolved/);
+  assert.match(report, /New issue/);
+  assert.match(report, /Old issue/);
 });
 
 test("groups results and applies search, category, confidence, and stage filters", function () {
@@ -625,7 +634,7 @@ test("redacted reports never include raw secret values", function () {
   dashboard.setExportSecrets({ secrets: [raw], available: true });
   assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
   assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
-  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.3");
+  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.4");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
 
   dashboard.element("exportSecretsBtn").listeners.click();
@@ -675,8 +684,19 @@ test("opens a detailed investigation and persists its local workflow state", fun
   assert.equal(saved.length, 1);
   assert.equal(saved[0].status, "investigating");
 
+  dashboard.context.saveWorkflowState(finding, {
+    pinned: true,
+    note: "local-only context",
+    verification: ["complete", "inconclusive"]
+  });
+  dashboard.context.renderInvestigationQueue();
+  assert.match(dashboard.element("investigationQueue").innerHTML, /Confirmed open redirect/);
+
   const reportFinding = dashboard.context.buildJsonReport(scan).findings[0];
   assert.equal(reportFinding.workflowState, "investigating");
+  assert.equal(reportFinding.queued, true);
+  assert.deepEqual(Array.from(reportFinding.verificationProgress), ["complete", "inconclusive"]);
+  assert.equal(JSON.stringify(reportFinding).includes("local-only context"), false);
   assert.match(reportFinding.impact, /trusted origin|redirect/i);
   assert.match(reportFinding.remediation, /known destinations|relative paths/i);
   assert.equal(reportFinding.investigationSteps.length >= 2, true);

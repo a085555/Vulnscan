@@ -2,16 +2,16 @@
 
 Desktop browser security workspace for controlled passive and safe-active webpage checks.
 
-**Tool by a085** · v6.3.0
+**Tool by a085** · v6.4.0
 
-## What is new in v6.3
+## What is new in v6.4
 
-- Stable SVG hover and focus styling prevents node boxes from shifting or flickering at different zoom levels
-- Node gestures are separated from canvas panning, with a movement threshold for deliberate drag actions
-- Selecting a node highlights its evidence route and fades unrelated areas when Focus path is enabled
-- Finding cards and investigation details can open and centre the matching map node directly
-- Confidence filtering, coverage states, breadcrumbs, and improved graph ordering make dense maps easier to read
-- Cursor-centred zoom, high-range node centring, double-click focus, and keyboard navigation improve large-map exploration
+- Change map compares compatible scans across findings and observed surface nodes
+- New, changed, resolved, and unchanged branches make regressions and retest results visible
+- Collapsible map branches and a large-map overview navigator reduce clutter in dense assessments
+- Findings can be pinned to an investigation queue and tracked with local verification checklists
+- Local investigation notes stay on the device and are excluded from exports
+- Sanitized comparison Markdown and standalone SVG map exports support reporting without raw secrets
 
 ## Features
 
@@ -31,6 +31,8 @@ Desktop browser security workspace for controlled passive and safe-active webpag
 - Session-only redacted request log
 - Search and filters for category, confidence, severity, stage, change, and workflow state
 - Searchable interactive scan maps with evidence-path focus for current and historical scans
+- Comparison maps, collapsible branches, and a large-map overview navigator
+- Local investigation queue and verification checklist states
 - Plain-language exploitability guidance with non-executable lab templates where a safe reproduction is useful
 - Secrets hidden throughout the workspace and redacted reports; distinct full values remain available through a separate confirmed export
 - Visible coverage warnings whenever a scanner processing limit is reached
@@ -94,11 +96,11 @@ Active modes show the exact origin, methods, planned request count, and budget b
 
 Each result has a report fingerprint and a stable identity. The fingerprint describes the current observation; the identity is based on the check and sanitized affected location so a wording or evidence change can be reported as changed. The investigation view combines recorded evidence with check-specific impact, remediation, exploitability conditions, weakening evidence, and verification guidance. Optional lab templates use harmless markers and reserved example hosts. The priority score is an operational sorting aid, not a replacement for manual validation.
 
-Workflow states are stored locally against the target and stable identity. They do not alter the original scanner result or its risk calculation.
+Workflow states, verification progress, queue membership, and notes are stored locally against the target and stable identity. They do not alter the original scanner result or its risk calculation. Notes are intentionally omitted from exported reports.
 
 ## Scan map
 
-The Surface view links results to bounded observations such as routes, parameter names, forms, resources, external origins, storage names, and authentication clues. The Scan flow view shows which selected stage and check produced each result, including limited or unavailable active-check coverage. Selecting a node highlights its evidence route, while double-clicking centres it at a readable scale. Arrow keys move between neighbouring nodes. Historical v6.2 and v6.3 scans keep their redacted map data; earlier compatible history can still use Scan flow view.
+The Surface view links results to bounded observations such as routes, parameter names, forms, resources, external origins, storage names, and authentication clues. The Scan flow view shows which selected stage and check produced each result, including limited or unavailable active-check coverage. When a compatible baseline exists, the Changes view groups new, changed, resolved, and unchanged findings and surface nodes. Branches can be collapsed, and larger graphs display an overview navigator. Selecting a node highlights its evidence route, while double-clicking centres it at a readable scale. Arrow keys move between neighbouring nodes. Compatible v6.2–v6.4 history keeps its redacted map data; earlier history can still use Scan flow view.
 
 ## Scan comparison
 
@@ -111,7 +113,7 @@ Vulnscan keeps redacted findings for the 12 most recent scans. Target matching u
 - Full values remain available after a scan through the separate **Full secret values** export, which requires an extra confirmation.
 - Request logs contain only the method, redacted URL, status, duration, and outcome for the current browser session.
 - Captured Set-Cookie values are replaced before header analysis; only names and attributes are assessed.
-- Workflow states contain only the target fingerprint, finding identity, state, and update time.
+- Workflow records contain the target fingerprint, finding identity, state, verification progress, queue membership, a bounded local note, and update time. Notes are not exported.
 - Scan health records whether source, DOM, finding, or secret collection reached a configured limit.
 - If response headers were not captured for the selected page load, refresh the target tab manually and scan again. Passive mode never reloads it.
 

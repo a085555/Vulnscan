@@ -82,3 +82,48 @@ test("map panning starts on the canvas but never on a node", function () {
   assert.equal(map.canPanFrom({ closest: function () { return null; } }), true);
   assert.equal(map.canPanFrom(null), true);
 });
+
+test("comparison map includes changed and resolved findings plus surface changes", function () {
+  const current = sampleScan();
+  const previous = sampleScan();
+  previous.timestamp = 10;
+  previous.findings = [model.normalize(Object.assign({}, current.findings[0], {
+    fingerprint: "",
+    detail: "older route evidence"
+  })), model.normalize({
+    checkId: "transport.old",
+    severity: "low",
+    confidence: "high",
+    bucket: "finding",
+    category: "transport",
+    type: "Resolved transport issue",
+    detail: "previously present",
+    source: "passive"
+  })];
+  previous.surface.nodes.push({ id: model.surfaceId("parameter", "legacy"), kind: "parameter", label: "legacy" });
+  const graph = map.buildComparison(current, previous, { comparableStages: ["passive"] });
+  assert.equal(graph.nodes.some(function (node) { return node.kind === "finding" && node.change === "changed"; }), true);
+  assert.equal(graph.nodes.some(function (node) { return node.kind === "finding" && node.change === "resolved"; }), true);
+  assert.equal(graph.comparison.findings.changed, 1);
+  assert.equal(graph.comparison.findings.resolved, 1);
+  assert.equal(graph.comparison.surface.resolved, 1);
+});
+
+test("collapsing a branch hides its descendants while keeping the group", function () {
+  const graph = map.build(sampleScan(), "surface", { collapsed: ["map-group-route"] });
+  const group = graph.nodes.find(function (node) { return node.id === "map-group-route"; });
+  assert.equal(group.collapsed, true);
+  assert.equal(group.hiddenCount, 2);
+  assert.equal(graph.nodes.some(function (node) { return node.kind === "route"; }), false);
+  assert.equal(graph.nodes.some(function (node) { return node.kind === "finding"; }), false);
+});
+
+test("sanitized SVG export contains labels but no scripts or finding evidence", function () {
+  const scan = sampleScan();
+  scan.findings[0].evidence = "sensitive evidence should stay out";
+  scan.findings[0].type = "Route <review>";
+  const svg = map.exportSvg(map.build(scan, "surface", {}));
+  assert.match(svg, /Route &lt;review&gt;/);
+  assert.doesNotMatch(svg, /sensitive evidence should stay out|<script/i);
+  assert.match(svg, /^<svg/);
+});

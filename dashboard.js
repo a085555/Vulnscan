@@ -32,6 +32,7 @@ const sourceFilterEl = document.getElementById("sourceFilter");
 const changeFilterEl = document.getElementById("changeFilter");
 const triageFilterEl = document.getElementById("triageFilter");
 const comparisonPanelEl = document.getElementById("comparisonPanel");
+const investigationQueueEl = document.getElementById("investigationQueue");
 const checkPicker = document.getElementById("checkPicker");
 const checkPickerSummary = document.getElementById("checkPickerSummary");
 const selectAllChecksBtn = document.getElementById("selectAllChecks");
@@ -63,6 +64,7 @@ const findingTriageState = document.getElementById("findingTriageState");
 const copyFindingBriefBtn = document.getElementById("copyFindingBrief");
 const showAffectedBtn = document.getElementById("showAffectedBtn");
 const showFindingMapBtn = document.getElementById("showFindingMapBtn");
+const toggleQueueBtn = document.getElementById("toggleQueueBtn");
 const scanMapDialog = document.getElementById("scanMapDialog");
 const scanMapBackdrop = document.getElementById("scanMapBackdrop");
 const scanMapClose = document.getElementById("scanMapClose");
@@ -72,9 +74,13 @@ const scanMapKind = document.getElementById("scanMapKind");
 const scanMapBucket = document.getElementById("scanMapBucket");
 const scanMapSeverity = document.getElementById("scanMapSeverity");
 const scanMapConfidence = document.getElementById("scanMapConfidence");
+const scanMapChange = document.getElementById("scanMapChange");
 const scanMapFocus = document.getElementById("scanMapFocus");
+const scanMapChanges = document.getElementById("scanMapChanges");
+const scanMapExport = document.getElementById("scanMapExport");
 const scanMapSvg = document.getElementById("scanMapSvg");
 const scanMapViewport = document.getElementById("scanMapViewport");
+const scanMapMiniMap = document.getElementById("scanMapMiniMap");
 const scanMapDetails = document.getElementById("scanMapDetails");
 const scanMapStatus = document.getElementById("scanMapStatus");
 const scanMapZoomOut = document.getElementById("scanMapZoomOut");
@@ -93,6 +99,8 @@ let currentSource = "all";
 let currentChange = "all";
 let currentTriage = "all";
 let currentComparisonStatuses = new Map();
+let currentComparisonScan = null;
+let currentComparisonResult = null;
 let triageStates = {};
 let activeFindingFingerprint = null;
 let lastScanData = null;
@@ -114,6 +122,7 @@ let mapPointer = null;
 let mapReturnFocus = null;
 let mapSelectedNodeId = null;
 let mapFocusMode = true;
+let mapCollapsedNodes = new Set();
 let mapBaseStatus = "No map loaded";
 const mapScaleMin = 0.45;
 const mapScaleMax = 24;
@@ -233,7 +242,7 @@ function triageKey(finding) {
   return lastScanData.urlFingerprint + ":" + finding.identityFingerprint;
 }
 
-function triageStateFor(finding) {
+function workflowFor(finding) {
   const key = triageKey(finding);
   let saved = triageStates[key];
   if (!saved && lastScanData) {
@@ -241,7 +250,19 @@ function triageStateFor(finding) {
     saved = triageStates[legacyKey];
     if (saved) triageStates[key] = saved;
   }
-  return saved && triageOptions.includes(saved.status) ? saved.status : "open";
+  return {
+    status: saved && triageOptions.includes(saved.status) ? saved.status : "open",
+    pinned: !!(saved && saved.pinned),
+    note: saved && typeof saved.note === "string" ? saved.note.slice(0, 2000) : "",
+    verification: saved && Array.isArray(saved.verification) ? saved.verification.slice(0, 12).map(function (value) {
+      return ["pending", "complete", "failed", "inconclusive"].includes(value) ? value : "pending";
+    }) : [],
+    updatedAt: saved && Number.isFinite(saved.updatedAt) ? saved.updatedAt : 0
+  };
+}
+
+function triageStateFor(finding) {
+  return workflowFor(finding).status;
 }
 
 function triageLabel(value) {
@@ -255,10 +276,19 @@ function triageLabel(value) {
   return labels[value] || labels.open;
 }
 
-function saveTriageState(finding, status) {
+function saveWorkflowState(finding, patch) {
   const key = triageKey(finding);
-  if (!key || !triageOptions.includes(status)) return;
-  triageStates[key] = { status: status, updatedAt: Date.now() };
+  if (!key) return;
+  const current = workflowFor(finding);
+  const next = Object.assign({}, current, patch || {});
+  if (!triageOptions.includes(next.status)) next.status = "open";
+  next.pinned = !!next.pinned;
+  next.note = String(next.note || "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").slice(0, 2000);
+  next.verification = Array.isArray(next.verification) ? next.verification.slice(0, 12).map(function (value) {
+    return ["pending", "complete", "failed", "inconclusive"].includes(value) ? value : "pending";
+  }) : [];
+  next.updatedAt = Date.now();
+  triageStates[key] = next;
   const recent = Object.keys(triageStates).sort(function (left, right) {
     return triageStates[right].updatedAt - triageStates[left].updatedAt;
   }).slice(0, 500);
@@ -268,10 +298,30 @@ function saveTriageState(finding, status) {
   chrome.storage.local.set({ findingTriage: triageStates });
 }
 
+function saveTriageState(finding, status) {
+  saveWorkflowState(finding, { status: status });
+}
+
 function findingByFingerprint(fingerprint) {
   return currentFindings.find(function (finding) {
     return finding.fingerprint === fingerprint;
   }) || null;
+}
+
+function renderInvestigationQueue() {
+  if (!investigationQueueEl) return;
+  const queued = currentFindings.filter(function (finding) { return workflowFor(finding).pinned; });
+  investigationQueueEl.hidden = !queued.length;
+  if (!queued.length) {
+    investigationQueueEl.innerHTML = "";
+    return;
+  }
+  investigationQueueEl.innerHTML = '<div class="queue-head"><strong>Investigation queue</strong><span>' + queued.length + ' pinned</span></div><div class="queue-items">' + queued.map(function (finding) {
+    return '<button class="queue-item" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">' + escapeHtml(finding.type) + "</button>";
+  }).join("") + "</div>";
+  investigationQueueEl.querySelectorAll(".queue-item").forEach(function (button) {
+    button.addEventListener("click", function () { openFindingDrawer(button.getAttribute("data-fingerprint")); });
+  });
 }
 
 function investigationBrief(finding) {
@@ -313,6 +363,7 @@ function openFindingDrawer(fingerprint) {
   const education = guidance.exploitability;
   const change = currentComparisonStatuses.get(finding.fingerprint);
   const workflow = triageStateFor(finding);
+  const workflowState = workflowFor(finding);
   const steps = [finding.verification].concat(guidance.steps).filter(Boolean).filter(function (step, index, list) {
     return list.indexOf(step) === index;
   });
@@ -326,6 +377,13 @@ function openFindingDrawer(fingerprint) {
   const terms = education.terms.length ? '<details class="learning-details"><summary>Terms used</summary><div class="learning-content glossary-list">' + education.terms.map(function (term) {
     return "<p><strong>" + escapeHtml(term.term) + "</strong>" + escapeHtml(term.definition) + "</p>";
   }).join("") + "</div></details>" : "";
+  const verificationPanel = '<section class="drawer-section"><h3>Verification checklist</h3><div class="verification-workflow">' + steps.map(function (step, index) {
+    const state = workflowState.verification[index] || "pending";
+    return '<label class="verification-step"><span>' + escapeHtml(step) + '</span><select class="verification-state" data-step="' + index + '">' +
+      ["pending", "complete", "failed", "inconclusive"].map(function (value) {
+        return '<option value="' + value + '"' + (value === state ? " selected" : "") + ">" + categoryLabel(value) + "</option>";
+      }).join("") + "</select></label>";
+  }).join("") + '</div></section><section class="drawer-section"><h3>Local note</h3><textarea class="finding-note" maxlength="2000" placeholder="Add investigation context without sensitive values">' + escapeHtml(workflowState.note) + '</textarea><p class="note-hint">Stored locally. Notes are not included in exported reports.</p></section>';
   activeFindingFingerprint = finding.fingerprint;
   drawerReturnFocus = document.activeElement || null;
   findingDrawerTitle.textContent = finding.type;
@@ -347,7 +405,7 @@ function openFindingDrawer(fingerprint) {
     '<section class="drawer-section"><h3>Recommended action</h3><p>' + escapeHtml(guidance.remediation) + "</p></section>" +
     '<section class="drawer-section"><h3>Investigation steps</h3><ol>' + steps.map(function (step) {
       return "<li>" + escapeHtml(step) + "</li>";
-    }).join("") + "</ol></section>" +
+    }).join("") + "</ol></section>" + verificationPanel +
     '<section class="drawer-section"><h3>Technical details</h3><dl class="technical-grid">' +
     "<dt>Target</dt><dd>" + escapeHtml(lastScanData ? lastScanData.url : "") + "</dd>" +
     "<dt>Check ID</dt><dd>" + escapeHtml(finding.checkId) + "</dd>" +
@@ -366,8 +424,22 @@ function openFindingDrawer(fingerprint) {
       });
     });
   }
+  findingDrawerBody.querySelectorAll(".verification-state").forEach(function (control) {
+    control.addEventListener("change", function () {
+      const verification = workflowFor(finding).verification;
+      verification[Number.parseInt(control.getAttribute("data-step"), 10)] = control.value;
+      saveWorkflowState(finding, { verification: verification });
+      setStatus("Verification checklist updated");
+    });
+  });
+  const note = findingDrawerBody.querySelector(".finding-note");
+  if (note) note.addEventListener("change", function () {
+    saveWorkflowState(finding, { note: note.value });
+    setStatus("Local investigation note saved");
+  });
   if (showAffectedBtn) showAffectedBtn.hidden = !finding.selector;
   if (showFindingMapBtn) showFindingMapBtn.hidden = !lastScanData;
+  if (toggleQueueBtn) toggleQueueBtn.textContent = workflowState.pinned ? "Remove from queue" : "Add to queue";
   findingDrawer.hidden = false;
   if (findingDrawerClose && typeof findingDrawerClose.focus === "function") findingDrawerClose.focus();
 }
@@ -410,6 +482,7 @@ function closeScanMap() {
   mapDragging = false;
   mapPointer = null;
   mapSelectedNodeId = null;
+  mapCollapsedNodes = new Set();
   if (scanMapViewport) scanMapViewport.classList.remove("dragging");
   if (mapReturnFocus && typeof mapReturnFocus.focus === "function") mapReturnFocus.focus();
   mapReturnFocus = null;
@@ -419,6 +492,9 @@ function applyMapTransform() {
   if (!scanMapSvg) return;
   const layer = scanMapSvg.querySelector(".scan-map-layer");
   if (layer) layer.setAttribute("transform", "translate(" + mapPanX + " " + mapPanY + ") scale(" + mapScale + ")");
+  if (scanMapMiniMap && mapGraph && !scanMapMiniMap.hidden) {
+    VulnscanMap.updateMiniMap(scanMapMiniMap, mapGraph, { x: mapPanX, y: mapPanY, scale: mapScale }, mapSelectedNodeId);
+  }
 }
 
 function resetMapTransform() {
@@ -491,6 +567,7 @@ function updateMapSelection(node, center) {
   if (!mapGraph || !scanMapSvg || !node) return;
   mapSelectedNodeId = node.id;
   const selected = VulnscanMap.highlight(scanMapSvg, mapGraph, node.id, mapFocusMode);
+  if (scanMapMiniMap && !scanMapMiniMap.hidden) VulnscanMap.updateMiniMap(scanMapMiniMap, mapGraph, { x: mapPanX, y: mapPanY, scale: mapScale }, node.id);
   renderMapDetails(node);
   if (scanMapStatus) scanMapStatus.textContent = mapBaseStatus + " · " + selected.nodeIds.length + " nodes in path";
   if (center) centerMapNode(node);
@@ -501,11 +578,12 @@ function renderMapDetails(node) {
   if (node.kind === "finding") {
     const finding = node.data;
     const guidance = VulnscanGuidance.get(finding);
-    const current = lastScanData && mapScanData && lastScanData.scanId === mapScanData.scanId;
+    const current = !node.resolved && lastScanData && mapScanData && lastScanData.scanId === mapScanData.scanId && !!findingByFingerprint(finding.fingerprint);
+    const changed = node.change === "changed" && node.previous ? '<dt>Changed fields</dt><dd>' + escapeHtml((node.changedFields || []).join(", ") || "Recorded evidence") + '</dd><dt>Previous observation</dt><dd>' + escapeHtml(node.previous.detail || "Not recorded") + "</dd>" : "";
     const actions = '<div class="map-detail-actions"><button class="btn ghost map-center-node">Centre node</button>' +
       (current ? '<button class="btn primary map-investigate" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Open investigation</button>' : "") + "</div>";
-    scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(finding.bucket) + " · " + escapeHtml(finding.severity) + " · " + escapeHtml(finding.confidence) + ' confidence</div><h3>' + escapeHtml(finding.type) + '</h3>' + mapBreadcrumb(node) +
-      '<p>' + escapeHtml(finding.detail) + '</p><dl><dt>Evidence</dt><dd>' + escapeHtml(finding.evidence || "No additional evidence recorded.") + '</dd><dt>Exploitability</dt><dd>' + escapeHtml(guidance.exploitability.plainLanguage) + '</dd><dt>Affected location</dt><dd>' + escapeHtml(finding.location || "Not recorded") + '</dd><dt>Stage</dt><dd>' + escapeHtml(sourceLabel(finding.source)) + '</dd></dl>' +
+    scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + (node.change ? escapeHtml(node.change) + " · " : "") + escapeHtml(finding.bucket) + " · " + escapeHtml(finding.severity) + " · " + escapeHtml(finding.confidence) + ' confidence</div><h3>' + escapeHtml(finding.type) + '</h3>' + mapBreadcrumb(node) +
+      '<p>' + escapeHtml(finding.detail) + '</p><dl><dt>Evidence</dt><dd>' + escapeHtml(finding.evidence || "No additional evidence recorded.") + '</dd>' + changed + '<dt>Exploitability</dt><dd>' + escapeHtml(guidance.exploitability.plainLanguage) + '</dd><dt>Affected location</dt><dd>' + escapeHtml(finding.location || "Not recorded") + '</dd><dt>Stage</dt><dd>' + escapeHtml(sourceLabel(finding.source)) + '</dd></dl>' +
       actions + (current ? "" : '<p class="map-readonly">Historical map — investigation details are read-only.</p>');
     const center = scanMapDetails.querySelector(".map-center-node");
     if (center) center.addEventListener("click", function () { centerMapNode(node); });
@@ -519,29 +597,48 @@ function renderMapDetails(node) {
   }
   const coverage = mapCoverage(node);
   const detail = node.detail || node.kind;
-  scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(categoryLabel(node.kind)) + '</div><h3>' + escapeHtml(node.label) + '</h3>' + mapBreadcrumb(node) + '<p>' + escapeHtml(detail) + '</p><dl>' +
+  const collapsible = node.kind === "group" || node.kind === "stage";
+  scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + (node.change ? escapeHtml(node.change) + " · " : "") + escapeHtml(categoryLabel(node.kind)) + '</div><h3>' + escapeHtml(node.label) + '</h3>' + mapBreadcrumb(node) + '<p>' + escapeHtml(detail) + '</p><dl>' +
     (node.location ? '<dt>Location</dt><dd>' + escapeHtml(node.location) + '</dd>' : "") +
     (node.occurrences ? '<dt>Occurrences</dt><dd>' + Number(node.occurrences) + '</dd>' : "") +
     (node.status ? '<dt>Status</dt><dd>' + escapeHtml(node.status) + '</dd>' : "") +
     (coverage ? '<dt>Coverage</dt><dd>' + escapeHtml(coverage.status) + ' · ' + coverage.inspected + ' inspected · ' + coverage.matched + ' matched</dd>' : "") +
-    '</dl><div class="map-detail-actions"><button class="btn ghost map-center-node">Centre node</button></div>';
+    (node.hiddenCount ? '<dt>Collapsed</dt><dd>' + Number(node.hiddenCount) + " hidden nodes</dd>" : "") +
+    '</dl><div class="map-detail-actions"><button class="btn ghost map-center-node">Centre node</button>' +
+    (collapsible ? '<button class="btn ghost map-toggle-branch">' + (node.collapsed ? "Expand branch" : "Collapse branch") + "</button>" : "") + "</div>";
   const center = scanMapDetails.querySelector(".map-center-node");
   if (center) center.addEventListener("click", function () { centerMapNode(node); });
+  const toggle = scanMapDetails.querySelector(".map-toggle-branch");
+  if (toggle) toggle.addEventListener("click", function () {
+    if (mapCollapsedNodes.has(node.id)) mapCollapsedNodes.delete(node.id);
+    else mapCollapsedNodes.add(node.id);
+    mapSelectedNodeId = node.id;
+    renderScanMap();
+  });
 }
 
 function renderScanMap(options) {
   if (!mapScanData || !scanMapSvg) return;
-  mapGraph = VulnscanMap.build(mapScanData, mapView, {
+  const filters = {
     query: scanMapSearch ? scanMapSearch.value : "",
     kind: scanMapKind ? scanMapKind.value : "all",
     bucket: scanMapBucket ? scanMapBucket.value : "all",
     severity: scanMapSeverity ? scanMapSeverity.value : "all",
-    confidence: scanMapConfidence ? scanMapConfidence.value : "all"
-  });
+    confidence: scanMapConfidence ? scanMapConfidence.value : "all",
+    change: scanMapChange ? scanMapChange.value : "all",
+    collapsed: Array.from(mapCollapsedNodes),
+    comparableStages: currentComparisonResult ? currentComparisonResult.comparableStages : []
+  };
+  if (mapView === "changes" && currentComparisonScan && currentComparisonResult) mapGraph = VulnscanMap.buildComparison(mapScanData, currentComparisonScan, filters);
+  else mapGraph = VulnscanMap.build(mapScanData, mapView, filters);
   VulnscanMap.render(scanMapSvg, mapGraph, {
     select: function (node) { updateMapSelection(node, false); },
     center: function (node) { updateMapSelection(node, true); }
   });
+  if (scanMapMiniMap) {
+    scanMapMiniMap.hidden = mapGraph.nodes.length < 18;
+    if (!scanMapMiniMap.hidden) VulnscanMap.renderMiniMap(scanMapMiniMap, mapGraph);
+  }
   if (options && options.resetView) resetMapTransform();
   else applyMapTransform();
   const selected = mapGraph.nodes.find(function (node) { return node.id === mapSelectedNodeId; });
@@ -559,16 +656,20 @@ function renderScanMap(options) {
       scanMapStatus.textContent += " · " + path.nodeIds.length + " nodes in path";
     }
   }
-  if (scanMapKind) scanMapKind.disabled = mapView !== "surface";
+  if (scanMapKind) scanMapKind.disabled = mapView === "flow";
+  if (scanMapChange) scanMapChange.disabled = mapView !== "changes";
 }
 
-function openScanMap(scan, returnFocus, selectedNodeId) {
+function openScanMap(scan, returnFocus, selectedNodeId, preferredView) {
   const normalized = normalizeScan(scan);
   if (!normalized || !scanMapDialog) return;
   mapScanData = normalized;
   mapSelectedNodeId = selectedNodeId || null;
+  mapCollapsedNodes = new Set();
   mapReturnFocus = returnFocus || document.activeElement || null;
-  mapView = normalized.surface.nodes.some(function (node) { return node.kind !== "target"; }) ? "surface" : "flow";
+  const changesAvailable = !!(currentComparisonScan && currentComparisonResult && lastScanData && lastScanData.scanId === normalized.scanId);
+  mapView = preferredView === "changes" && changesAvailable ? "changes" : normalized.surface.nodes.some(function (node) { return node.kind !== "target"; }) ? "surface" : "flow";
+  if (scanMapChanges) scanMapChanges.hidden = !changesAvailable;
   document.querySelectorAll(".scan-map-view").forEach(function (button) {
     button.classList.toggle("active", button.getAttribute("data-map-view") === mapView);
   });
@@ -578,6 +679,7 @@ function openScanMap(scan, returnFocus, selectedNodeId) {
   if (scanMapBucket) scanMapBucket.value = "all";
   if (scanMapSeverity) scanMapSeverity.value = "all";
   if (scanMapConfidence) scanMapConfidence.value = "all";
+  if (scanMapChange) scanMapChange.value = "all";
   scanMapDialog.hidden = false;
   renderScanMap({ resetView: true });
   if (mapSelectedNodeId && mapGraph) {
@@ -781,7 +883,13 @@ function clearResults() {
     comparisonPanelEl.hidden = true;
     comparisonPanelEl.innerHTML = "";
   }
+  if (investigationQueueEl) {
+    investigationQueueEl.hidden = true;
+    investigationQueueEl.innerHTML = "";
+  }
   currentComparisonStatuses = new Map();
+  currentComparisonScan = null;
+  currentComparisonResult = null;
   currentChange = "all";
   currentTriage = "all";
   if (changeFilterEl) changeFilterEl.value = "all";
@@ -1522,6 +1630,8 @@ function renderFindings(data) {
   lastScanData = scan;
   currentFindings = scan.findings;
   currentComparisonStatuses = new Map();
+  currentComparisonScan = null;
+  currentComparisonResult = null;
   currentChange = "all";
   if (changeFilterEl) changeFilterEl.value = "all";
   showTarget(scan.url || "");
@@ -1543,6 +1653,7 @@ function renderFindings(data) {
   renderComparison(scan);
   updateCategoryFilter();
   applyFilter();
+  renderInvestigationQueue();
   chrome.runtime.sendMessage({ type: "get_request_log", scanId: scan.scanId }, function (response) {
     renderRequestLog((response && response.entries) || [], scan.requestSummary || (response && response.summary));
   });
@@ -1608,6 +1719,9 @@ function stageForSource(source) {
 
 function renderComparison(scan) {
   if (!comparisonPanelEl) return;
+  currentComparisonScan = null;
+  currentComparisonResult = null;
+  if (scanMapChanges) scanMapChanges.hidden = true;
   comparisonPanelEl.hidden = false;
   comparisonPanelEl.innerHTML = '<div class="comparison-baseline">Looking for a matching earlier scan...</div>';
   chrome.storage.local.get("scanHistory", function (data) {
@@ -1643,6 +1757,8 @@ function renderComparison(scan) {
       return comparableStages.includes(stageForSource(finding.source));
     });
     const comparison = VulnscanFindings.compare(currentComparable, previousComparable);
+    currentComparisonScan = previous;
+    currentComparisonResult = { comparison: comparison, comparableStages: comparableStages };
     currentComparisonStatuses = new Map();
     comparison.new.forEach(function (finding) { currentComparisonStatuses.set(finding.fingerprint, "new"); });
     comparison.changed.forEach(function (pair) { currentComparisonStatuses.set(pair.current.fingerprint, "changed"); });
@@ -1665,7 +1781,16 @@ function renderComparison(scan) {
       '<div class="comparison-counts"><span class="new">' + comparison.new.length + " new</span>" +
       '<span class="changed">' + comparison.changed.length + " changed</span>" +
       '<span class="resolved">' + comparison.resolved.length + " resolved</span>" +
-      '<span class="unchanged">' + comparison.unchanged.length + " unchanged</span></div>" + resolved;
+      '<span class="unchanged">' + comparison.unchanged.length + " unchanged</span></div>" + resolved +
+      '<div class="comparison-actions"><button class="btn ghost export-comparison">Export comparison</button><button class="btn ghost open-change-map">Open change map</button></div>';
+    if (scanMapChanges) scanMapChanges.hidden = false;
+    const exportButton = comparisonPanelEl.querySelector(".export-comparison");
+    if (exportButton) exportButton.addEventListener("click", function () {
+      downloadBlob(buildComparisonMarkdown(scan, previous, currentComparisonResult), "text/markdown", "vuln-scan-comparison-" + Date.now() + ".md");
+      setStatus("Sanitized comparison report exported");
+    });
+    const openChanges = comparisonPanelEl.querySelector(".open-change-map");
+    if (openChanges) openChanges.addEventListener("click", function () { openScanMap(scan, openChanges, null, "changes"); });
     applyFilter();
   });
 }
@@ -1703,7 +1828,7 @@ function applyFilter() {
   }
   if (currentTriage !== "all") {
     list = list.filter(function (finding) {
-      return triageStateFor(finding) === currentTriage;
+      return currentTriage === "queued" ? workflowFor(finding).pinned : triageStateFor(finding) === currentTriage;
     });
   }
   if (currentSearch) {
@@ -1738,11 +1863,12 @@ function applyFilter() {
     const change = currentComparisonStatuses.get(finding.fingerprint);
     const changeBadge = change ? '<span class="change-badge ' + change + '">' + change + "</span>" : "";
     const workflow = triageStateFor(finding);
+    const queued = workflowFor(finding).pinned ? '<span class="queue-badge">queued</span>' : "";
     return '<div class="finding ' + finding.severity + '">' +
       '<div class="type"><span class="severity ' + finding.severity + '">' + finding.severity + "</span>" +
       '<span class="confidence ' + finding.confidence + '">' + escapeHtml(finding.confidence) + " confidence</span>" +
       '<span class="source-badge ' + escapeHtml(finding.source) + '">' + escapeHtml(sourceLabel(finding.source)) + "</span>" +
-      '<span class="finding-title">' + escapeHtml(finding.type) + "</span>" + occurrences + changeBadge +
+      '<span class="finding-title">' + escapeHtml(finding.type) + "</span>" + occurrences + changeBadge + queued +
       '<span class="triage-badge ' + escapeHtml(workflow) + '">' + escapeHtml(triageLabel(workflow)) + "</span>" +
       '<button class="inspect-btn" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Investigate</button>' +
       '<button class="map-btn" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Map</button>' +
@@ -2189,8 +2315,11 @@ function exportFinding(finding) {
 function exportInvestigation(finding) {
   const guidance = VulnscanGuidance.get(finding);
   const priority = VulnscanGuidance.priority(finding);
+  const workflow = workflowFor(finding);
   return Object.assign(exportFinding(finding), {
-    workflowState: triageStateFor(finding),
+    workflowState: workflow.status,
+    queued: workflow.pinned,
+    verificationProgress: workflow.verification,
     priority: priority,
     impact: guidance.impact,
     remediation: guidance.remediation,
@@ -2215,6 +2344,49 @@ function downloadBlob(content, type, filename) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function buildComparisonMarkdown(current, previous, state) {
+  const comparison = state && state.comparison;
+  if (!comparison) return "# VulnScan Comparison\n\nNo compatible comparison is available.\n";
+  const graph = VulnscanMap.buildComparison(current, previous, { comparableStages: state.comparableStages });
+  let markdown = "# VulnScan Comparison\n\n";
+  markdown += "**Target:** " + current.url + "\n\n";
+  markdown += "**Current scan:** " + new Date(current.timestamp).toISOString() + "\n\n";
+  markdown += "**Previous scan:** " + new Date(previous.timestamp).toISOString() + "\n\n";
+  markdown += "**Comparable stages:** " + state.comparableStages.join(", ") + "\n\n";
+  markdown += "**Finding changes:** " + comparison.new.length + " new · " + comparison.changed.length + " changed · " + comparison.resolved.length + " resolved · " + comparison.unchanged.length + " unchanged\n\n";
+  if (graph.comparison) {
+    markdown += "**Surface changes:** " + graph.comparison.surface.new + " new · " + graph.comparison.surface.changed + " changed · " + graph.comparison.surface.resolved + " resolved · " + graph.comparison.surface.unchanged + " unchanged\n\n";
+  }
+  function list(title, items, value) {
+    markdown += "## " + title + "\n\n";
+    if (!items.length) {
+      markdown += "None.\n\n";
+      return;
+    }
+    items.forEach(function (item) {
+      const finding = value(item);
+      markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
+      if (finding.location) markdown += "  - Affected location: " + finding.location + "\n";
+    });
+    markdown += "\n";
+  }
+  list("New", comparison.new, function (finding) { return finding; });
+  markdown += "## Changed\n\n";
+  if (!comparison.changed.length) markdown += "None.\n\n";
+  comparison.changed.forEach(function (pair) {
+    const fields = ["severity", "confidence", "bucket", "type", "detail", "evidence", "verification", "location", "occurrences"].filter(function (field) {
+      return String(pair.current[field] || "") !== String(pair.previous[field] || "");
+    });
+    markdown += "- **" + pair.current.type + "** — changed " + fields.join(", ") + "\n";
+    markdown += "  - Current: [" + pair.current.severity + "] " + pair.current.detail + "\n";
+    markdown += "  - Previous: [" + pair.previous.severity + "] " + pair.previous.detail + "\n";
+  });
+  markdown += "\n";
+  list("Resolved", comparison.resolved, function (finding) { return finding; });
+  markdown += "> Scanner evidence is redacted. A changed or resolved status should be verified against the recorded coverage.\n";
+  return markdown;
 }
 
 function buildMarkdownReport(scan) {
@@ -2274,7 +2446,7 @@ function buildMarkdownReport(scan) {
 
 function buildJsonReport(scan) {
   return {
-    reportVersion: "6.3",
+    reportVersion: "6.4",
     schemaVersion: 8,
     url: scan.url,
     scanId: scan.scanId,
@@ -2493,8 +2665,21 @@ if (findingTriageState) {
     if (!finding) return;
     saveTriageState(finding, findingTriageState.value);
     applyFilter();
+    renderInvestigationQueue();
     openFindingDrawer(finding.fingerprint);
     setStatus("Finding workflow updated to " + triageLabel(findingTriageState.value));
+  });
+}
+if (toggleQueueBtn) {
+  toggleQueueBtn.addEventListener("click", function () {
+    const finding = findingByFingerprint(activeFindingFingerprint);
+    if (!finding) return;
+    const pinned = !workflowFor(finding).pinned;
+    saveWorkflowState(finding, { pinned: pinned });
+    toggleQueueBtn.textContent = pinned ? "Remove from queue" : "Add to queue";
+    renderInvestigationQueue();
+    applyFilter();
+    setStatus(pinned ? "Finding added to the investigation queue" : "Finding removed from the investigation queue");
   });
 }
 if (copyFindingBriefBtn) {
@@ -2565,14 +2750,17 @@ if (toggleRequestLogBtn) {
 
 document.querySelectorAll(".scan-map-view").forEach(function (button) {
   button.addEventListener("click", function () {
-    mapView = button.getAttribute("data-map-view") === "flow" ? "flow" : "surface";
+    const requested = button.getAttribute("data-map-view");
+    if (requested === "changes" && (!currentComparisonScan || !currentComparisonResult)) return;
+    mapView = ["surface", "flow", "changes"].includes(requested) ? requested : "surface";
+    mapCollapsedNodes = new Set();
     document.querySelectorAll(".scan-map-view").forEach(function (item) {
       item.classList.toggle("active", item === button);
     });
     renderScanMap({ resetView: true });
   });
 });
-[scanMapSearch, scanMapKind, scanMapBucket, scanMapSeverity, scanMapConfidence].forEach(function (control) {
+[scanMapSearch, scanMapKind, scanMapBucket, scanMapSeverity, scanMapConfidence, scanMapChange].forEach(function (control) {
   if (!control) return;
   control.addEventListener(control === scanMapSearch ? "input" : "change", renderScanMap);
 });
@@ -2587,6 +2775,11 @@ if (scanMapZoomOut) scanMapZoomOut.addEventListener("click", function () {
   setMapScale(mapScale / 1.2, mapPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2));
 });
 if (scanMapFit) scanMapFit.addEventListener("click", resetMapTransform);
+if (scanMapExport) scanMapExport.addEventListener("click", function () {
+  if (!mapGraph) return;
+  downloadBlob(VulnscanMap.exportSvg(mapGraph), "image/svg+xml", "vuln-scan-map-" + Date.now() + ".svg");
+  setStatus("Sanitized scan map exported");
+});
 if (scanMapFocus) scanMapFocus.addEventListener("click", function () {
   mapFocusMode = !mapFocusMode;
   scanMapFocus.classList.toggle("active", mapFocusMode);
@@ -2600,7 +2793,9 @@ if (scanMapReset) scanMapReset.addEventListener("click", function () {
   if (scanMapBucket) scanMapBucket.value = "all";
   if (scanMapSeverity) scanMapSeverity.value = "all";
   if (scanMapConfidence) scanMapConfidence.value = "all";
+  if (scanMapChange) scanMapChange.value = "all";
   mapSelectedNodeId = null;
+  mapCollapsedNodes = new Set();
   mapFocusMode = true;
   if (scanMapFocus) {
     scanMapFocus.classList.add("active");
@@ -2649,6 +2844,17 @@ if (scanMapViewport) {
   scanMapViewport.addEventListener("pointerup", stopMapDrag);
   scanMapViewport.addEventListener("pointercancel", stopMapDrag);
 }
+if (scanMapMiniMap) {
+  scanMapMiniMap.addEventListener("click", function (event) {
+    if (!mapGraph) return;
+    const bounds = scanMapMiniMap.getBoundingClientRect();
+    const x = (event.clientX - bounds.left) / Math.max(1, bounds.width) * mapGraph.width;
+    const y = (event.clientY - bounds.top) / Math.max(1, bounds.height) * mapGraph.height;
+    mapPanX = mapGraph.width / 2 - x * mapScale;
+    mapPanY = mapGraph.height / 2 - y * mapScale;
+    applyMapTransform();
+  });
+}
 
 document.addEventListener("keydown", function (event) {
   if (event.key === "Escape" && scanMapDialog && !scanMapDialog.hidden) {
@@ -2670,7 +2876,7 @@ chrome.storage.local.get("lastScan", function (data) {
   if (!data.lastScan) return;
   if (!renderFindings(data.lastScan)) {
     chrome.storage.local.remove("lastScan", function () {
-      setStatus("This saved result needs a fresh v6.3 scan — the incompatible cache was cleared");
+      setStatus("This saved result needs a fresh v6.4 scan — the incompatible cache was cleared");
     });
   }
 });
@@ -2697,7 +2903,10 @@ chrome.storage.local.get("enabledChecks", function (data) {
 });
 chrome.storage.local.get("findingTriage", function (data) {
   triageStates = data.findingTriage && typeof data.findingTriage === "object" ? data.findingTriage : {};
-  if (lastScanData) applyFilter();
+  if (lastScanData) {
+    applyFilter();
+    renderInvestigationQueue();
+  }
 });
 updateModeHelp();
 loadTabs();
