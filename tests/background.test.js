@@ -77,6 +77,10 @@ function createWorker(shared) {
   return { state: state, listeners: listeners, send: send, model: context.VulnscanFindings };
 }
 
+function contentSender(tabId, url) {
+  return { tab: { id: tabId }, url: url };
+}
+
 test("keeps raw secrets in session storage across worker restarts", async function () {
   const shared = { local: {}, session: {} };
   const first = createWorker(shared);
@@ -86,19 +90,19 @@ test("keeps raw secrets in session storage across worker restarts", async functi
     scanId: "scan-1",
     url: "https://example.test/page",
     secrets: ["Stripe: raw-one", "Stripe: raw-one", "Stripe: raw-two"]
-  });
+  }, contentSender(7, "https://example.test/page"));
   const second = createWorker(shared);
   const restored = await second.send({
     type: "get_export_secrets",
     scanId: "scan-1",
-    urlFingerprint: second.model.key("https://example.test/page")
+    vaultFingerprint: second.model.key("https://example.test/page")
   });
   assert.deepEqual(Array.from(restored.secrets), ["Stripe: raw-one", "Stripe: raw-two"]);
 
   const wrongScan = await second.send({
     type: "get_export_secrets",
     scanId: "scan-2",
-    urlFingerprint: second.model.key("https://example.test/page")
+    vaultFingerprint: second.model.key("https://example.test/page")
   });
   assert.deepEqual(Array.from(wrongScan.secrets), []);
 
@@ -106,25 +110,81 @@ test("keeps raw secrets in session storage across worker restarts", async functi
   assert.equal(shared.session.secretVault, undefined);
 });
 
+test("restores the active scan context after a worker restart", async function () {
+  const shared = { local: {}, session: {} };
+  const first = createWorker(shared);
+  await first.send({ type: "scan_begin", scanId: "scan-restart", tabId: 9, origin: "https://example.test" });
+  const restarted = createWorker(shared);
+  const response = await restarted.send({
+    type: "scan_results",
+    scanId: "scan-restart",
+    scanMode: "passive",
+    url: "https://example.test/page",
+    findings: []
+  }, contentSender(9, "https://example.test/page"));
+  assert.equal(response.ok, true);
+  assert.equal(shared.local.lastScan.scanId, "scan-restart");
+});
+
+test("keeps scan-scoped redirect evidence across worker restarts", async function () {
+  const shared = { local: {}, session: {} };
+  const first = createWorker(shared);
+  await first.send({ type: "scan_begin", scanId: "scan-redirect", tabId: 4, origin: "https://example.test" });
+  const listenerWorker = createWorker(shared);
+  listenerWorker.listeners.redirect({
+    url: "https://example.test/?next=https%3A%2F%2Fcanary.example%2F",
+    redirectUrl: "https://canary.example/",
+    statusCode: 302,
+    tabId: -1
+  });
+  const restarted = createWorker(shared);
+  const response = await restarted.send({ type: "get_redirects", scanId: "scan-redirect" });
+  assert.equal(response.redirects.length, 1);
+  assert.equal(response.redirects[0].scanId, "scan-redirect");
+});
+
 test("does not relay session secrets to a content-script sender", async function () {
   const worker = createWorker();
+  await worker.send({ type: "scan_begin", scanId: "scan-1", tabId: 7, origin: "https://example.test" });
   await worker.send({
     type: "export_secrets",
     scanId: "scan-1",
     url: "https://example.test/",
     secrets: ["raw-value"]
-  }, { url: "https://example.test/" });
+  }, contentSender(7, "https://example.test/"));
   const response = await worker.send({
     type: "get_export_secrets",
     scanId: "scan-1",
-    urlFingerprint: worker.model.key("https://example.test/")
-  }, { url: "https://example.test/" });
+    vaultFingerprint: worker.model.key("https://example.test/")
+  }, contentSender(7, "https://example.test/"));
   assert.equal(response.error, "Extension page required");
   assert.equal(response.secrets, undefined);
 });
 
+test("rejects passive results from the wrong tab or URL", async function () {
+  const worker = createWorker();
+  await worker.send({ type: "scan_begin", scanId: "scan-1", tabId: 7, origin: "https://example.test" });
+  const wrongTab = await worker.send({
+    type: "scan_results",
+    scanId: "scan-1",
+    url: "https://example.test/page",
+    findings: []
+  }, contentSender(8, "https://example.test/page"));
+  assert.equal(wrongTab.error, "Scan context mismatch");
+
+  const wrongUrl = await worker.send({
+    type: "scan_results",
+    scanId: "scan-1",
+    url: "https://example.test/other",
+    findings: []
+  }, contentSender(7, "https://example.test/page"));
+  assert.equal(wrongUrl.error, "Scan context mismatch");
+  assert.equal(worker.state.local.lastScan, undefined);
+});
+
 test("never copies unknown secret fields into local scan storage", async function () {
   const worker = createWorker();
+  await worker.send({ type: "scan_begin", scanId: "scan-1", tabId: 7, origin: "https://example.test" });
   await worker.send({
     type: "scan_results",
     scanId: "scan-1",
@@ -140,15 +200,16 @@ test("never copies unknown secret fields into local scan storage", async functio
       exportDetail: "raw-value",
       full: "raw-value"
     }]
-  });
+  }, contentSender(7, "https://example.test/?token=raw-value"));
   assert.equal(JSON.stringify(worker.state.local).includes("raw-value"), false);
-  assert.equal(worker.state.local.lastScan.schemaVersion, 6);
+  assert.equal(worker.state.local.lastScan.schemaVersion, 7);
   assert.equal(worker.state.local.lastScan.scanId, "scan-1");
   assert.match(worker.state.local.lastScan.url, /token=%5Bredacted%5D/);
 });
 
 test("stores Full Scan mode and sanitized stage state", async function () {
   const worker = createWorker();
+  await worker.send({ type: "scan_begin", scanId: "scan-full", tabId: 7, origin: "https://example.test" });
   await worker.send({
     type: "scan_results",
     schemaVersion: 4,
@@ -157,7 +218,7 @@ test("stores Full Scan mode and sanitized stage state", async function () {
     url: "https://example.test/",
     findings: [],
     stageSummary: { passive: "complete", headers: "complete", safe: "running", lab: "invalid", raw: "do-not-copy" }
-  });
+  }, contentSender(7, "https://example.test/"));
   const stored = worker.state.local.lastScan;
   assert.equal(stored.scanMode, "full");
   assert.equal(stored.stageSummary.safe, "running");
@@ -201,9 +262,9 @@ test("migrates v2 scans and history without copying unknown fields", function ()
   };
   const worker = createWorker(shared);
   worker.listeners.installed({ reason: "update" });
-  assert.equal(shared.local.lastScan.schemaVersion, 6);
+  assert.equal(shared.local.lastScan.schemaVersion, 7);
   assert.equal(shared.local.lastScan.scanMode, "legacy");
-  assert.equal(shared.local.scanHistory[0].schemaVersion, 6);
+  assert.equal(shared.local.scanHistory[0].schemaVersion, 7);
   assert.equal(JSON.stringify(shared.local).includes("do-not-copy"), false);
 });
 
@@ -232,6 +293,7 @@ test("clears cached headers at navigation and tab lifecycle boundaries", async f
   });
   let captured = await worker.send({ type: "get_headers", tabId: 4 });
   assert.equal(captured.headers.length, 2);
+  assert.equal(captured.headers[0].value, "a=[redacted]");
   worker.listeners.beforeRequest({ tabId: 4, type: "main_frame" });
   captured = await worker.send({ type: "get_headers", tabId: 4 });
   assert.equal(captured.statusCode, 0);

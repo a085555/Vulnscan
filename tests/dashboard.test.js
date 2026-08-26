@@ -110,7 +110,7 @@ function createDashboard() {
   const chrome = {
     runtime: {
       lastError: null,
-      getManifest: function () { return { version: "6.0.0" }; },
+      getManifest: function () { return { version: "6.1.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -160,7 +160,7 @@ function createDashboard() {
       executeScript: async function (options) {
         if (options.files && options.files.includes("content.js")) {
           storage.lastScan = {
-            schemaVersion: 6,
+            schemaVersion: 7,
             scanId: currentScanId,
             scanMode: "passive",
             url: tabResponse.url,
@@ -263,6 +263,27 @@ test("renders actionable and review counts separately", function () {
   assert.match(dashboard.element("results").innerHTML, /Evidence &amp; verification/);
 });
 
+test("evaluates combined CSP policies and modern cookie constraints", function () {
+  const dashboard = createDashboard();
+  const findings = dashboard.context.analyzeHeaders([
+    { name: "Content-Security-Policy", value: "default-src *; script-src 'unsafe-inline'" },
+    { name: "Content-Security-Policy", value: "default-src 'self'; script-src 'self'; frame-ancestors 'self'" },
+    { name: "Content-Security-Policy-Report-Only", value: "default-src 'none'" },
+    { name: "Strict-Transport-Security", value: "max-age=0" },
+    { name: "X-Frame-Options", value: "ALLOW-FROM https://old.example" },
+    { name: "Referrer-Policy", value: "unsafe-url" },
+    { name: "Set-Cookie", value: "__Host-session=raw-cookie-value; Path=/; SameSite=None" }
+  ], "https://example.test/", ["headers.security", "headers.cookies"]);
+  assert.equal(findings.some(function (finding) { return finding.checkId === "header.csp.unsafe"; }), false);
+  assert.equal(findings.some(function (finding) { return finding.checkId === "header.hsts.disabled"; }), true);
+  assert.equal(findings.some(function (finding) { return finding.checkId === "header.framing.invalid"; }), true);
+  const cookie = findings.find(function (finding) { return finding.checkId === "header.cookie-flags"; });
+  assert.match(cookie.detail, /SameSite=None without Secure|__Host-/);
+  assert.doesNotMatch(JSON.stringify(findings), /raw-cookie-value/);
+  assert.match(dashboard.element("headerResults").innerHTML, /2 enforced/);
+  assert.match(dashboard.element("headerResults").innerHTML, /CSP Report-Only/);
+});
+
 test("shows INFO for informational findings and OK only for an empty scan", function () {
   const dashboard = createDashboard();
   const model = dashboard.context.VulnscanFindings;
@@ -341,7 +362,7 @@ test("passive mode sends no scanner requests or target reloads", async function 
   await dashboard.context.runScan();
   assert.equal(dashboard.getReloadCount(), 0);
   assert.equal(dashboard.getFetchCount(), 0);
-  assert.equal(dashboard.storage.lastScan.schemaVersion, 6);
+  assert.equal(dashboard.storage.lastScan.schemaVersion, 7);
   assert.equal(dashboard.storage.lastScan.scanMode, "passive");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_begin"; }), true);
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_end"; }), true);
@@ -530,7 +551,7 @@ test("redacted reports never include raw secret values", function () {
   dashboard.setExportSecrets({ secrets: [raw], available: true });
   assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
   assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
-  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.0");
+  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.1");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
 
   dashboard.element("exportSecretsBtn").listeners.click();

@@ -14,7 +14,7 @@
         <div class="logo" aria-hidden="true">V</div>
         <div>
           <div class="brand-name">VULN<span>SCAN</span></div>
-          <div id="brandVersion" class="brand-ver">v6.0.0</div>
+          <div id="brandVersion" class="brand-ver">v6.1.0</div>
           <div class="brand-by">Security workspace</div>
         </div>
       </div>
@@ -270,7 +270,7 @@
         <div class="panel about-panel">
           <div class="panel-head"><span>ABOUT</span></div>
           <div class="panel-body about-body">
-            <p><strong>Vulnscan Security Workspace</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v6.0.0</strong>.</p>
+            <p><strong>Vulnscan Security Workspace</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v6.1.0</strong>.</p>
             <ul>
               <li><strong>Passive</strong> inspects the loaded page without sending scanner-generated requests.</li>
               <li><strong>Safe Active</strong> allows same-origin GET, HEAD, and OPTIONS checks within a request budget.</li>
@@ -315,7 +315,10 @@
             <option value="resolved">Resolved</option>
           </select>
         </label>
-        <button id="copyFindingBrief" class="btn ghost">Copy investigation brief</button>
+        <div class="drawer-actions">
+          <button id="showAffectedBtn" class="btn ghost" hidden>Show on page</button>
+          <button id="copyFindingBrief" class="btn ghost">Copy investigation brief</button>
+        </div>
       </footer>
     </aside>
   </div>

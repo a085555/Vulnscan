@@ -1,22 +1,83 @@
 (function () {
+  function collectPageSource(limit) {
+    if (!document.createTreeWalker || typeof NodeFilter === "undefined") {
+      const html = String(document.documentElement.innerHTML || "");
+      return { text: html.slice(0, limit), truncated: html.length > limit };
+    }
+    let text = "";
+    let truncated = false;
+    const append = function (value) {
+      const part = String(value || "");
+      const remaining = limit - text.length;
+      if (part.length > remaining) {
+        text += part.slice(0, Math.max(0, remaining));
+        truncated = true;
+        return false;
+      }
+      text += part;
+      return true;
+    };
+    const appendNode = function (node) {
+      if (node.nodeType === 1) {
+        if (!append("<" + String(node.tagName || "").toLowerCase())) return false;
+        Array.from(node.attributes || []).some(function (attribute) {
+          return !append(" " + attribute.name + '="' + attribute.value + '"');
+        });
+        return !truncated && append(">");
+      }
+      return append(node.nodeValue || "");
+    };
+    const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT | NodeFilter.SHOW_COMMENT);
+    if (!appendNode(document.documentElement)) return { text: text, truncated: true };
+    let node;
+    while ((node = walker.nextNode())) {
+      if (!appendNode(node)) break;
+    }
+    return { text: text, truncated: truncated || !!node };
+  }
+
   const findings = [];
-  const pageText = document.documentElement.innerHTML;
   const pageUrl = location.href;
-  const pageLower = pageText.toLowerCase();
   const scanId = globalThis.__vulnscanScanId || null;
   const scanMode = globalThis.__vulnscanScanMode || "passive";
   const enabledChecks = VulnscanChecks.normalize(globalThis.__vulnscanEnabledChecks);
+  const limits = VulnscanFindings.limits;
+  const sourceChecks = ["passive.dom", "passive.secrets", "passive.components", "passive.source"];
+  const sourceNeeded = sourceChecks.some(function (id) { return enabledChecks.includes(id); });
+  const sourceSnapshot = sourceNeeded ? collectPageSource(limits.pageSourceCharacters) : { text: "", truncated: false };
+  const pageText = sourceSnapshot.text;
+  const pageLower = pageText.toLowerCase();
+  const findingCounts = Object.create(null);
+  const scanLimits = {
+    sourceTruncated: sourceSnapshot.truncated,
+    domTruncated: false,
+    findingsTruncated: false,
+    secretsTruncated: false
+  };
 
   function checkEnabled(id) {
     return VulnscanChecks.enabled(enabledChecks, id);
+  }
+
+  function selectedNodes(selector) {
+    const nodes = document.querySelectorAll(selector);
+    if (nodes.length > limits.domNodesPerCheck) scanLimits.domTruncated = true;
+    return Array.prototype.slice.call(nodes, 0, limits.domNodesPerCheck);
   }
 
   function add(severity, type, detail, options) {
     const item = options || {};
     const check = VulnscanChecks.findingCheck(item.checkId);
     if (check && !checkEnabled(check)) return;
+    const checkId = String(item.checkId || "general.observation");
+    findingCounts[checkId] = findingCounts[checkId] || 0;
+    if (findings.length >= limits.findings - 1 || findingCounts[checkId] >= limits.findingsPerCheck) {
+      scanLimits.findingsTruncated = true;
+      return;
+    }
+    findingCounts[checkId]++;
     findings.push(VulnscanFindings.normalize({
-      checkId: item.checkId,
+      checkId: checkId,
       severity: severity,
       confidence: item.confidence,
       bucket: item.bucket,
@@ -25,6 +86,8 @@
       detail: detail,
       evidence: item.evidence,
       verification: item.verification,
+      location: item.location,
+      selector: item.selector,
       source: "passive",
       occurrences: item.occurrences
     }));
@@ -55,6 +118,36 @@
     return name;
   }
 
+  function elementSelector(element) {
+    const parts = [];
+    let current = element;
+    while (current && parts.length < 8) {
+      const tag = String(current.tagName || "").toLowerCase();
+      if (!/^[a-z][a-z0-9-]*$/.test(tag)) break;
+      const id = String(current.id || "");
+      if (/^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(id)) {
+        parts.unshift(tag + "#" + id);
+        break;
+      }
+      const parent = current.parentElement;
+      if (parent && parent.children) {
+        const siblings = Array.from(parent.children).filter(function (child) {
+          return String(child.tagName || "").toLowerCase() === tag;
+        });
+        parts.unshift(tag + ":nth-of-type(" + (siblings.indexOf(current) + 1) + ")");
+      } else {
+        parts.unshift(tag);
+      }
+      current = parent;
+    }
+    const selector = parts.join(" > ");
+    try {
+      return selector && document.querySelectorAll(selector).length === 1 ? selector : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
   function unique(values, limit) {
     return Array.from(new Set(values.filter(Boolean))).slice(0, limit);
   }
@@ -78,7 +171,7 @@
     try {
       const current = new URL(pageUrl);
       current.searchParams.forEach(function (value, name) { parameterNames.push(safeName(name)); });
-      document.querySelectorAll("a[href], form[action], script[src], link[href], iframe[src]").forEach(function (element) {
+      selectedNodes("a[href], form[action], script[src], link[href], iframe[src]").forEach(function (element) {
         const value = element.href || element.action || element.src;
         if (!value) return;
         let target;
@@ -94,7 +187,7 @@
       });
     } catch (e) {}
 
-    const forms = Array.from(document.querySelectorAll("form"));
+    const forms = selectedNodes("form");
     let postForms = 0;
     let passwordForms = 0;
     let fileForms = 0;
@@ -118,6 +211,7 @@
         category: "inventory",
         evidence: "Routes: " + endpointList.join(", ") + ". Query values are hidden.",
         verification: "Review the routes as a coverage map and confirm which ones are intended to be public.",
+        location: "current page",
         occurrences: endpointList.length
       });
     }
@@ -131,6 +225,7 @@
         category: "inventory",
         evidence: parameters.length + " unique query or form field name(s) were observed. Values were not collected.",
         verification: "Use the names to check validation, authorization, and server-side handling on approved targets.",
+        location: "current page",
         occurrences: parameters.length
       });
     }
@@ -143,6 +238,7 @@
         category: "inventory",
         evidence: "Only form methods and field types were counted; field values were not read.",
         verification: "Review sensitive forms for access control, anti-CSRF handling, validation, and secure transport.",
+        location: "current page",
         occurrences: forms.length
       });
     }
@@ -156,6 +252,7 @@
         category: "inventory",
         evidence: thirdParties.length ? "Third-party hosts: " + thirdParties.join(", ") : "No third-party hosts were observed in the mapped elements.",
         verification: "Confirm each external dependency and embedded origin is expected and still required.",
+        location: "current page",
         occurrences: scriptCount + styleCount + frameCount
       });
     }
@@ -170,6 +267,7 @@
         category: "inventory",
         evidence: "Storage key names were read. Storage values were never accessed.",
         verification: "Review whether the named entries are necessary and whether sensitive state is stored in the browser.",
+        location: "browser storage",
         occurrences: localNames.length + sessionNames.length
       });
     }
@@ -186,6 +284,7 @@
         category: "authentication",
         evidence: authCookies.length ? "Cookie names: " + authCookies.join(", ") + ". Cookie values were not collected." : "Password fields were observed; no cookie values were collected.",
         verification: "Review login, recovery, session rotation, logout, and reauthentication behavior manually.",
+        location: "current page",
         occurrences: passwordForms + authCookies.length
       });
     }
@@ -207,6 +306,7 @@
       category: "dom-xss",
       evidence: foundSinks.length + " sink name(s) appear in the serialized page source.",
       verification: "Trace whether data controlled by the URL, storage, messages, or user input reaches any listed sink.",
+      location: "serialized page source",
       occurrences: foundSinks.length
     });
   }
@@ -230,6 +330,7 @@
   ];
 
   const secretVault = [];
+  let secretVaultCharacters = 0;
   const seenSecrets = new Set();
   secretPatterns.forEach(function (pattern) {
     if (!checkEnabled("passive.secrets")) return;
@@ -238,8 +339,15 @@
       const raw = match[0];
       if (seenSecrets.has(raw)) continue;
       seenSecrets.add(raw);
+      const entry = pattern.name + ": " + raw;
+      if (raw.length > limits.secretValueCharacters || secretVault.length >= limits.secretValues ||
+          secretVaultCharacters + entry.length > limits.secretVaultCharacters) {
+        scanLimits.secretsTruncated = true;
+        continue;
+      }
       values.push(raw);
-      secretVault.push(pattern.name + ": " + raw);
+      secretVault.push(entry);
+      secretVaultCharacters += entry.length;
     }
     if (!values.length) return;
     add("high", "Possible secret", pattern.name + " (" + values.length + " distinct value" + (values.length === 1 ? "" : "s") + " hidden — use export to view)", {
@@ -249,11 +357,12 @@
       category: "secrets",
       evidence: values.length + " distinct value" + (values.length === 1 ? "" : "s") + " matched the " + pattern.name + " pattern. Values are redacted here.",
       verification: "Confirm whether the value is active, scoped appropriately, and safe to expose in client-delivered source.",
+      location: "serialized page source",
       occurrences: values.length
     });
   });
 
-  document.querySelectorAll("form").forEach(function (form) {
+  selectedNodes("form").forEach(function (form) {
     const method = (form.method || "get").toLowerCase();
     const action = form.action || pageUrl;
     const safeAction = redactUrl(action);
@@ -266,7 +375,9 @@
           bucket: "review",
           category: "forms",
           evidence: "A POST form has no obvious CSRF or nonce input.",
-          verification: "Check server-side SameSite, Origin/Referer, and CSRF-token validation before treating this as vulnerable."
+          verification: "Check server-side SameSite, Origin/Referer, and CSRF-token validation before treating this as vulnerable.",
+          location: safeAction,
+          selector: elementSelector(form)
         });
       }
     }
@@ -277,7 +388,9 @@
         bucket: "finding",
         category: "transport",
         evidence: "An HTTPS page contains a form action using plain HTTP.",
-        verification: "Submit only in a safe test environment and confirm the browser sends the form over an unencrypted connection."
+        verification: "Submit only in a safe test environment and confirm the browser sends the form over an unencrypted connection.",
+        location: safeAction,
+        selector: elementSelector(form)
       });
     }
     try {
@@ -289,7 +402,9 @@
           bucket: "review",
           category: "forms",
           evidence: "The form action host differs from the current page host.",
-          verification: "Confirm that the destination is an expected and trusted service."
+          verification: "Confirm that the destination is an expected and trusted service.",
+          location: safeAction,
+          selector: elementSelector(form)
         });
       }
     } catch (e) {}
@@ -297,7 +412,7 @@
 
   if (checkEnabled("passive.inventory")) addPassiveInventory();
 
-  document.querySelectorAll("img, script, link, iframe, source, video, audio, embed, object").forEach(function (element) {
+  selectedNodes("img, script, link, iframe, source, video, audio, embed, object").forEach(function (element) {
     const source = element.src || element.href || element.data;
     if (source && source.indexOf("http://") === 0 && location.protocol === "https:") {
       add("medium", "Mixed content", redactUrl(source), {
@@ -306,14 +421,16 @@
         bucket: "finding",
         category: "transport",
         evidence: "An HTTPS page references a resource over plain HTTP.",
-        verification: "Confirm the request is not upgraded or blocked and replace it with an HTTPS resource."
+        verification: "Confirm the request is not upgraded or blocked and replace it with an HTTPS resource.",
+        location: redactUrl(source),
+        selector: elementSelector(element)
       });
     }
   });
 
   if (document.cookie) {
     const cookieNames = Array.from(new Set(document.cookie.split(";").map(function (cookie) {
-      return cookie.trim().split("=")[0];
+      return safeName(cookie.trim().split("=")[0]);
     }).filter(Boolean)));
     if (cookieNames.length) {
       add("low", "Cookies visible to JavaScript", cookieNames.join(", "), {
@@ -323,6 +440,7 @@
         category: "cookies",
         evidence: cookieNames.length + " cookie name(s) are exposed through document.cookie.",
         verification: "Determine whether any listed cookie carries authentication or other sensitive state that should use HttpOnly.",
+        location: "document.cookie",
         occurrences: cookieNames.length
       });
     }
@@ -346,7 +464,8 @@
       bucket: "review",
       category: "components",
       evidence: "A source reference resembles a versioned " + library.name + " asset.",
-      verification: "Confirm the loaded version in browser developer tools and compare it with the vendor's supported releases."
+      verification: "Confirm the loaded version in browser developer tools and compare it with the vendor's supported releases.",
+      location: library.name
     });
   });
 
@@ -365,7 +484,8 @@
       bucket: "review",
       category: "source",
       evidence: "Matching text appears in the serialized page source.",
-      verification: "Inspect the original source context and confirm whether the text exposes useful internal information."
+      verification: "Inspect the original source context and confirm whether the text exposes useful internal information.",
+      location: "serialized page source"
     });
   });
 
@@ -385,22 +505,45 @@
         category: "redirects",
         evidence: "The current URL contains " + matchedParams.length + " exact redirect-style query key" + (matchedParams.length === 1 ? "" : "s") + ".",
         verification: "Change the parameter to a controlled external HTTPS destination and confirm whether the application redirects there.",
+        location: "query: " + matchedParams.join(", "),
         occurrences: matchedParams.length
       });
     }
   } catch (e) {}
 
-  document.querySelectorAll("script[src]").forEach(function (script) {
+  selectedNodes("meta[http-equiv]").forEach(function (meta) {
+    if (!checkEnabled("passive.source")) return;
+    const httpEquiv = meta.httpEquiv || (typeof meta.getAttribute === "function" ? meta.getAttribute("http-equiv") : "");
+    if (String(httpEquiv || "").toLowerCase() !== "content-security-policy") return;
+    const directives = unique(String(meta.content || "").split(";").map(function (part) {
+      return part.trim().split(/\s+/)[0];
+    }), 20);
+    add("info", "CSP meta policy observed", directives.length ? directives.join(", ") : "Policy content is empty", {
+      checkId: "source.csp-meta",
+      confidence: "high",
+      bucket: "review",
+      category: "headers",
+      evidence: "A Content-Security-Policy meta element was found. Directive values were not retained.",
+      verification: "Compare it with the response headers. Remember that frame-ancestors is not enforced when delivered through a meta element.",
+      location: "meta http-equiv=Content-Security-Policy",
+      selector: elementSelector(meta)
+    });
+  });
+
+  selectedNodes("script[src], link[rel~='stylesheet'][href]").forEach(function (element) {
     try {
-      const source = new URL(script.src, pageUrl);
-      if (source.hostname !== location.hostname && !script.integrity) {
-        add("low", "External script without SRI", redactUrl(source.href), {
-          checkId: "script.missing-sri",
+      const isStylesheet = String(element.tagName || "").toLowerCase() === "link";
+      const source = new URL(element.src || element.href, pageUrl);
+      if (source.origin !== new URL(pageUrl).origin && !element.integrity) {
+        add("low", "External " + (isStylesheet ? "stylesheet" : "script") + " without SRI", redactUrl(source.href), {
+          checkId: isStylesheet ? "style.missing-sri" : "script.missing-sri",
           confidence: "medium",
           bucket: "review",
           category: "supply-chain",
-          evidence: "A cross-origin script element has no integrity attribute.",
-          verification: "Confirm that the script is immutable and whether Subresource Integrity is appropriate for this deployment."
+          evidence: "A cross-origin " + (isStylesheet ? "stylesheet" : "script") + " element has no integrity attribute.",
+          verification: "Confirm that the resource is immutable and whether Subresource Integrity is appropriate for this deployment.",
+          location: redactUrl(source.href),
+          selector: elementSelector(element)
         });
       }
     } catch (e) {}
@@ -428,7 +571,8 @@
       bucket: "review",
       category: "recon",
       evidence: "Names or asset paths associated with these technologies appear in the page.",
-      verification: "Confirm each technology from response headers, loaded assets, or framework-specific runtime markers."
+      verification: "Confirm each technology from response headers, loaded assets, or framework-specific runtime markers.",
+      location: "current page"
     });
   }
 
@@ -444,11 +588,12 @@
       category: "disclosure",
       evidence: "Potentially sensitive file or path names appear in the page source.",
       verification: "Check whether the referenced paths are reachable and return content distinct from the site's normal not-found response.",
+      location: "serialized page source",
       occurrences: foundHints.length
     });
   }
 
-  const inlineEvents = document.querySelectorAll("[onclick], [onerror], [onload], [onmouseover], [onfocus], [onblur]");
+  const inlineEvents = selectedNodes("[onclick], [onerror], [onload], [onmouseover], [onfocus], [onblur]");
   if (inlineEvents.length) {
     add("low", "Inline event handlers present", inlineEvents.length + " element(s)", {
       checkId: "dom.inline-events",
@@ -457,6 +602,8 @@
       category: "dom-xss",
       evidence: inlineEvents.length + " element(s) use inline JavaScript event attributes.",
       verification: "Review whether untrusted values can enter these handlers or whether CSP blocks their execution.",
+      location: "inline event attributes",
+      selector: elementSelector(inlineEvents[0]),
       occurrences: inlineEvents.length
     });
   }
@@ -489,7 +636,10 @@
   }
 
   const flows = [];
-  Array.from(document.scripts).forEach(function (script) {
+  let flowSelector = "";
+  const inlineScripts = Array.prototype.slice.call(document.scripts || [], 0, limits.domNodesPerCheck);
+  if ((document.scripts || []).length > inlineScripts.length) scanLimits.domTruncated = true;
+  inlineScripts.forEach(function (script) {
     if (script.src) return;
     const statements = String(script.textContent || "").split(/[;\n]+/).map(function (statement) {
       return statement.trim();
@@ -519,11 +669,13 @@
       const directSource = findSource(statement);
       if (directSource) {
         flows.push(directSource.name + " -> " + sink.name);
+        flowSelector = flowSelector || elementSelector(script);
         return;
       }
       Object.keys(taintedVariables).some(function (name) {
         if (new RegExp("\\b" + escapeRegExp(name) + "\\b").test(statement)) {
           flows.push(taintedVariables[name] + " -> " + sink.name);
+          flowSelector = flowSelector || elementSelector(script);
           return true;
         }
         return false;
@@ -540,21 +692,45 @@
       category: "dom-xss",
       evidence: "An inline script moves a recognized browser-controlled source into an HTML or code execution sink.",
       verification: "Trace the complete data flow and test with a harmless marker to determine whether encoding or sanitization blocks execution.",
+      location: "inline script",
+      selector: flowSelector,
       occurrences: uniqueFlows.length
     });
+  }
+
+  const limitNotes = [];
+  if (scanLimits.sourceTruncated) limitNotes.push("page source capped at " + limits.pageSourceCharacters + " characters");
+  if (scanLimits.domTruncated) limitNotes.push("DOM element processing limit reached");
+  if (scanLimits.findingsTruncated) limitNotes.push("finding limit reached");
+  if (scanLimits.secretsTruncated) limitNotes.push("secret export limit reached");
+  if (limitNotes.length) {
+    findings.push(VulnscanFindings.normalize({
+      checkId: "scan.limits",
+      severity: "info",
+      confidence: "high",
+      bucket: "review",
+      category: "scan-health",
+      type: "Scan limits reached",
+      detail: limitNotes.join("; ") + ".",
+      evidence: "The scanner stopped collecting affected data at its configured safety limit.",
+      verification: "Narrow the page or selected checks and scan again if complete coverage is required.",
+      location: "current page",
+      source: "passive"
+    }));
   }
 
   const normalizedFindings = VulnscanFindings.dedupe(findings);
   chrome.runtime.sendMessage({
     type: "scan_results",
-    schemaVersion: 6,
+    schemaVersion: 7,
     scanId: scanId,
     scanMode: scanMode,
     checksRun: VulnscanChecks.effective(enabledChecks, scanMode),
     url: pageUrl,
     findings: normalizedFindings,
     summary: VulnscanFindings.summarize(normalizedFindings),
-    risk: VulnscanFindings.risk(normalizedFindings)
+    risk: VulnscanFindings.risk(normalizedFindings),
+    scanLimits: scanLimits
   });
 
   if (secretVault.length) {

@@ -7,12 +7,24 @@ let redirectCache = {};
 let currentScan = null;
 const vaultKey = "secretVault";
 const requestLogKey = "requestLog";
+const scanContextKey = "scanContext";
+const redirectLogKey = "redirectLog";
 
 function comparableUrl(value) {
   try {
     const url = new URL(value);
     url.hash = "";
     return url.href;
+  } catch (e) {
+    return "";
+  }
+}
+
+function targetUrl(value) {
+  try {
+    const url = new URL(value);
+    const names = Array.from(new Set(Array.from(url.searchParams.keys()))).sort().slice(0, 100);
+    return url.origin + url.pathname + (names.length ? "?" + names.map(encodeURIComponent).join("&") : "");
   } catch (e) {
     return "";
   }
@@ -37,12 +49,76 @@ function redactUrl(value) {
 }
 
 function urlFingerprint(value) {
+  return VulnscanFindings.key(targetUrl(value));
+}
+
+function exactUrlFingerprint(value) {
   return VulnscanFindings.key(comparableUrl(value));
 }
 
 function isExtensionPage(sender) {
   const base = chrome.runtime.getURL("");
   return !!(sender && sender.url && sender.url.startsWith(base));
+}
+
+function validScanSender(message, sender) {
+  if (!currentScan || !sender || !sender.tab || sender.tab.id !== currentScan.tabId) return false;
+  if (!message.scanId || message.scanId !== currentScan.id) return false;
+  try {
+    const senderUrl = new URL(sender.url || "");
+    return senderUrl.origin === currentScan.origin && comparableUrl(sender.url) === comparableUrl(message.url);
+  } catch (e) {
+    return false;
+  }
+}
+
+function cleanFinding(finding) {
+  const item = finding && typeof finding === "object" ? finding : {};
+  const short = function (value, limit) {
+    return String(value === undefined || value === null ? "" : value).slice(0, limit || VulnscanFindings.limits.messageTextCharacters);
+  };
+  return VulnscanFindings.normalize({
+    checkId: short(item.checkId, 120),
+    severity: item.severity,
+    confidence: item.confidence,
+    bucket: item.bucket,
+    category: short(item.category, 80),
+    type: short(item.type, 240),
+    detail: short(item.detail),
+    evidence: short(item.evidence),
+    verification: short(item.verification),
+    location: short(item.location, 1000),
+    selector: short(item.selector, 240),
+    source: "passive",
+    occurrences: Math.min(10000, Math.max(1, Number.parseInt(item.occurrences, 10) || 1))
+  });
+}
+
+function cleanScanLimits(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    sourceTruncated: source.sourceTruncated === true,
+    domTruncated: source.domTruncated === true,
+    findingsTruncated: source.findingsTruncated === true,
+    secretsTruncated: source.secretsTruncated === true
+  };
+}
+
+function cleanSecrets(values) {
+  const limits = VulnscanFindings.limits;
+  const secrets = [];
+  let size = 0;
+  const seen = new Set();
+  (Array.isArray(values) ? values : []).some(function (value) {
+    const secret = String(value);
+    if (!secret || secret.length > limits.secretValueCharacters || seen.has(secret)) return false;
+    if (secrets.length >= limits.secretValues || size + secret.length > limits.secretVaultCharacters) return true;
+    seen.add(secret);
+    secrets.push(secret);
+    size += secret.length;
+    return false;
+  });
+  return secrets;
 }
 
 function clearVault(callback) {
@@ -52,8 +128,20 @@ function clearVault(callback) {
 }
 
 function clearSessionData(callback) {
-  chrome.storage.session.remove([vaultKey, requestLogKey], function () {
+  chrome.storage.session.remove([vaultKey, requestLogKey, scanContextKey, redirectLogKey], function () {
     if (callback) callback();
+  });
+}
+
+function loadScanContext(callback) {
+  if (currentScan) {
+    callback(currentScan);
+    return;
+  }
+  chrome.storage.session.get(scanContextKey, function (data) {
+    const stored = data[scanContextKey];
+    if (stored && stored.id && Number.isInteger(stored.tabId) && stored.origin) currentScan = stored;
+    callback(currentScan);
   });
 }
 
@@ -85,22 +173,25 @@ function cleanStageSummary(summary, mode) {
 }
 
 function migrateScan(scan) {
-  if (!scan || !scan.url || !scan.urlFingerprint || ![2, 3, 4, 5, 6].includes(scan.schemaVersion)) return null;
+  if (!scan || !scan.url || ![2, 3, 4, 5, 6, 7].includes(scan.schemaVersion)) return null;
   const findings = VulnscanFindings.dedupe(scan.findings || []);
   const mode = ["passive", "safe", "lab", "full"].includes(scan.scanMode) ? scan.scanMode : "legacy";
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     scanId: scan.scanId || null,
     scanMode: mode,
     url: redactUrl(scan.url),
-    urlFingerprint: scan.urlFingerprint,
+    urlFingerprint: urlFingerprint(scan.url),
+    legacyUrlFingerprint: scan.legacyUrlFingerprint || (scan.schemaVersion < 7 ? scan.urlFingerprint : null),
+    vaultFingerprint: scan.schemaVersion === 7 ? scan.vaultFingerprint || null : null,
     findings: findings,
     timestamp: scan.timestamp || Date.now(),
     summary: VulnscanFindings.summarize(findings),
     risk: VulnscanFindings.risk(findings),
     requestSummary: cleanRequestSummary(scan.requestSummary, mode),
     stageSummary: cleanStageSummary(scan.stageSummary, mode),
-    checksRun: VulnscanChecks.effective(scan.checksRun, mode)
+    checksRun: VulnscanChecks.effective(scan.checksRun, mode),
+    scanLimits: cleanScanLimits(scan.scanLimits)
   };
 }
 
@@ -116,6 +207,26 @@ function cleanRequestEntries(entries) {
   });
 }
 
+function cleanCapturedHeaders(headers) {
+  const allowed = new Set([
+    "content-security-policy", "content-security-policy-report-only", "strict-transport-security",
+    "x-frame-options", "x-content-type-options", "referrer-policy", "permissions-policy", "set-cookie"
+  ]);
+  return (headers || []).slice(0, 200).reduce(function (result, header) {
+    const name = String(header.name || "").toLowerCase().slice(0, 120);
+    if (!allowed.has(name)) return result;
+    let value = String(header.value || "").slice(0, VulnscanFindings.limits.messageTextCharacters);
+    if (name === "set-cookie") {
+      const separator = value.indexOf(";");
+      const pair = separator < 0 ? value : value.slice(0, separator);
+      const equals = pair.indexOf("=");
+      value = (equals < 0 ? pair : pair.slice(0, equals) + "=[redacted]") + (separator < 0 ? "" : value.slice(separator));
+    }
+    result.push({ name: name, value: value });
+    return result;
+  }, []);
+}
+
 chrome.webRequest.onBeforeRequest.addListener(
   function (details) {
     if (details.tabId >= 0 && details.type === "main_frame") {
@@ -128,7 +239,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 function captureResponseHeaders(details) {
   if (details.tabId >= 0 && details.type === "main_frame") {
     headerCache[details.tabId] = {
-      headers: details.responseHeaders || [],
+      headers: cleanCapturedHeaders(details.responseHeaders),
       url: details.url,
       statusCode: details.statusCode
     };
@@ -151,20 +262,24 @@ try {
 
 chrome.webRequest.onBeforeRedirect.addListener(
   function (details) {
-    if (!currentScan || !details.url || !details.redirectUrl) return;
-    try {
-      const from = new URL(details.url);
-      if (currentScan.origin && from.origin !== currentScan.origin) return;
-      const entry = {
-        from: details.url,
-        to: details.redirectUrl,
-        status: details.statusCode,
-        tabId: details.tabId,
-        scanId: currentScan.id,
-        ts: Date.now()
-      };
-      redirectCache[details.url + "->" + details.redirectUrl] = entry;
-    } catch (e) {}
+    if (!details.url || !details.redirectUrl) return;
+    loadScanContext(function (scan) {
+      if (!scan) return;
+      try {
+        const from = new URL(details.url);
+        if (scan.origin && from.origin !== scan.origin) return;
+        const entry = {
+          from: details.url,
+          to: details.redirectUrl,
+          status: details.statusCode,
+          tabId: details.tabId,
+          scanId: scan.id,
+          ts: Date.now()
+        };
+        redirectCache[details.url + "->" + details.redirectUrl] = entry;
+        chrome.storage.session.set({ [redirectLogKey]: redirectCache });
+      } catch (e) {}
+    });
   },
   { urls: ["<all_urls>"] }
 );
@@ -203,10 +318,11 @@ chrome.runtime.onInstalled.addListener(function () {
       const history = data.scanHistory.map(function (entry) {
         const mode = ["passive", "safe", "lab", "full"].includes(entry.scanMode) ? entry.scanMode : "legacy";
         return {
-          schemaVersion: 6,
+          schemaVersion: 7,
           scanId: entry.scanId || null,
           url: redactUrl(entry.url),
-          urlFingerprint: entry.urlFingerprint || null,
+          urlFingerprint: urlFingerprint(entry.url),
+          legacyUrlFingerprint: entry.legacyUrlFingerprint || (entry.schemaVersion < 7 ? entry.urlFingerprint || null : null),
           risk: entry.risk || "legacy",
           timestamp: entry.timestamp || Date.now(),
           summary: entry.summary && typeof entry.summary === "object" ? {
@@ -224,6 +340,7 @@ chrome.runtime.onInstalled.addListener(function () {
           stageSummary: cleanStageSummary(entry.stageSummary, mode),
           checksRun: VulnscanChecks.effective(entry.checksRun, mode),
           findings: VulnscanFindings.dedupe(entry.findings || []),
+          scanLimits: cleanScanLimits(entry.scanLimits),
           comparisonReady: entry.schemaVersion >= 5 && Array.isArray(entry.findings)
         };
       }).slice(0, 12);
@@ -233,45 +350,64 @@ chrome.runtime.onInstalled.addListener(function () {
 });
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+  if (!message || typeof message !== "object" || typeof message.type !== "string" || message.type.length > 80) {
+    sendResponse({ error: "Invalid message" });
+    return true;
+  }
   if (message.type !== "scan_results" && message.type !== "export_secrets" && !isExtensionPage(sender)) {
     sendResponse({ error: "Extension page required" });
     return true;
   }
 
   if (message.type === "scan_results") {
-    const findings = VulnscanFindings.dedupe(message.findings || []);
-    const summary = VulnscanFindings.summarize(findings);
-    const mode = ["passive", "safe", "lab", "full"].includes(message.scanMode) ? message.scanMode : "passive";
-    chrome.storage.local.set({
-      lastScan: {
-        schemaVersion: 6,
-        scanId: message.scanId || null,
-        scanMode: mode,
-        url: redactUrl(message.url),
-        urlFingerprint: urlFingerprint(message.url),
-        findings: findings,
-        timestamp: Date.now(),
-        summary: summary,
-        risk: VulnscanFindings.risk(findings),
-        stageSummary: cleanStageSummary(message.stageSummary, mode),
-        checksRun: VulnscanChecks.effective(message.checksRun, mode)
+    loadScanContext(function () {
+      if (!validScanSender(message, sender)) {
+        sendResponse({ error: "Scan context mismatch" });
+        return;
       }
-    }, function () {
-      sendResponse({ ok: true });
+      const supplied = Array.isArray(message.findings) ? message.findings.slice(0, VulnscanFindings.limits.findings) : [];
+      const findings = VulnscanFindings.dedupe(supplied.map(cleanFinding));
+      const summary = VulnscanFindings.summarize(findings);
+      const mode = ["passive", "safe", "lab", "full"].includes(message.scanMode) ? message.scanMode : "passive";
+      chrome.storage.local.set({
+        lastScan: {
+          schemaVersion: 7,
+          scanId: message.scanId,
+          scanMode: mode,
+          url: redactUrl(message.url),
+          urlFingerprint: urlFingerprint(message.url),
+          vaultFingerprint: exactUrlFingerprint(message.url),
+          findings: findings,
+          timestamp: Date.now(),
+          summary: summary,
+          risk: VulnscanFindings.risk(findings),
+          stageSummary: cleanStageSummary(message.stageSummary, mode),
+          checksRun: VulnscanChecks.effective(message.checksRun, mode),
+          scanLimits: cleanScanLimits(message.scanLimits)
+        }
+      }, function () {
+        sendResponse({ ok: true });
+      });
     });
     return true;
   }
 
   if (message.type === "export_secrets") {
-    const secrets = Array.from(new Set((message.secrets || []).map(String)));
-    const vault = {
-      scanId: message.scanId || (currentScan && currentScan.id) || null,
-      url: message.url || "",
-      urlFingerprint: urlFingerprint(message.url),
-      secrets: secrets
-    };
-    chrome.storage.session.set({ [vaultKey]: vault }, function () {
-      sendResponse({ ok: true, count: secrets.length });
+    loadScanContext(function () {
+      if (!validScanSender(message, sender)) {
+        sendResponse({ error: "Scan context mismatch" });
+        return;
+      }
+      const secrets = cleanSecrets(message.secrets);
+      const vault = {
+        scanId: currentScan.id,
+        url: comparableUrl(message.url),
+        urlFingerprint: exactUrlFingerprint(message.url),
+        secrets: secrets
+      };
+      chrome.storage.session.set({ [vaultKey]: vault }, function () {
+        sendResponse({ ok: true, count: secrets.length });
+      });
     });
     return true;
   }
@@ -280,7 +416,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     chrome.storage.session.get(vaultKey, function (data) {
       const vault = data[vaultKey] || null;
       const sameScan = !!message.scanId && vault && vault.scanId === message.scanId;
-      const sameUrl = !!message.urlFingerprint && vault && vault.urlFingerprint === message.urlFingerprint;
+      const sameUrl = !!message.vaultFingerprint && vault && vault.urlFingerprint === message.vaultFingerprint;
       sendResponse({
         secrets: vault && sameScan && sameUrl ? vault.secrets.slice() : [],
         available: !!(vault && sameScan && sameUrl)
@@ -321,19 +457,28 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === "clear_all_session") {
+    currentScan = null;
     clearSessionData(function () { sendResponse({ ok: true }); });
     return true;
   }
 
   if (message.type === "scan_begin") {
+    let origin = "";
+    try { origin = new URL(message.origin).origin; } catch (e) {}
+    if (!message.scanId || String(message.scanId).length > 100 || !Number.isInteger(message.tabId) || !origin || origin !== message.origin) {
+      sendResponse({ error: "Invalid scan context" });
+      return true;
+    }
     currentScan = {
-      id: message.scanId || ("s" + Date.now()),
-      tabId: Number.isInteger(message.tabId) ? message.tabId : null,
-      origin: message.origin || null
+      id: message.scanId,
+      tabId: message.tabId,
+      origin: origin
     };
     redirectCache = {};
     clearSessionData(function () {
-      sendResponse({ ok: true, scanId: currentScan.id });
+      chrome.storage.session.set({ [scanContextKey]: currentScan }, function () {
+        sendResponse({ ok: true, scanId: currentScan.id });
+      });
     });
     return true;
   }
@@ -342,7 +487,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     if (!message.scanId || (currentScan && currentScan.id === message.scanId)) {
       currentScan = null;
     }
-    sendResponse({ ok: true });
+    chrome.storage.session.remove(scanContextKey, function () { sendResponse({ ok: true }); });
     return true;
   }
 
@@ -352,12 +497,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === "get_redirects") {
-    const out = Object.keys(redirectCache).map(function (key) {
-      return redirectCache[key];
-    }).filter(function (entry) {
-      return !message.scanId || entry.scanId === message.scanId;
+    chrome.storage.session.get(redirectLogKey, function (data) {
+      if (!Object.keys(redirectCache).length && data[redirectLogKey]) redirectCache = data[redirectLogKey];
+      const out = Object.keys(redirectCache).map(function (key) {
+        return redirectCache[key];
+      }).filter(function (entry) {
+        return !message.scanId || entry.scanId === message.scanId;
+      });
+      sendResponse({ redirects: out });
     });
-    sendResponse({ redirects: out });
     return true;
   }
 

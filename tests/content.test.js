@@ -69,8 +69,28 @@ test("exports every distinct secret while keeping one redacted type finding", fu
   assert.equal(vault.secrets.length, 2);
   assert.equal(new Set(vault.secrets).size, 2);
   assert.equal(vault.scanId, "scan-1");
-  assert.equal(result(messages).schemaVersion, 6);
+  assert.equal(result(messages).schemaVersion, 7);
   assert.equal(result(messages).scanMode, "passive");
+});
+
+test("reports source truncation instead of silently treating a partial scan as complete", function () {
+  const html = "a".repeat(2 * 1024 * 1024 + 20);
+  const stored = result(scan({ html: html }));
+  assert.equal(stored.scanLimits.sourceTruncated, true);
+  assert.equal(stored.findings.some(function (finding) { return finding.checkId === "scan.limits"; }), true);
+});
+
+test("checks SRI on external scripts and stylesheets", function () {
+  const script = { tagName: "SCRIPT", src: "https://cdn.example.net/app.js", integrity: "" };
+  const style = { tagName: "LINK", href: "https://cdn.example.net/app.css", integrity: "" };
+  const findings = result(scan({
+    nodes: { "script[src], link[rel~='stylesheet'][href]": [script, style] }
+  })).findings;
+  assert.equal(findings.some(function (finding) { return finding.checkId === "script.missing-sri"; }), true);
+  assert.equal(findings.some(function (finding) { return finding.checkId === "style.missing-sri"; }), true);
+  assert.equal(findings.every(function (finding) {
+    return !finding.checkId.endsWith("missing-sri") || !!finding.location;
+  }), true);
 });
 
 test("keeps generic token patterns in review", function () {

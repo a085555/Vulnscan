@@ -2,20 +2,22 @@
 
 Desktop browser security workspace for controlled passive and safe-active webpage checks.
 
-**Tool by a085** · v6.0.0
+**Tool by a085** · v6.1.0
 
-## What is new in v6
+## What is new in v6.1
 
-- Professional security-workspace layout with clearer assessment controls and results
-- Investigation drawer for every result with impact, remediation, verification steps, technical metadata, and operational priority
-- Local workflow states: Open, Investigating, Accepted risk, False positive, and Resolved
-- Workflow, impact, remediation, priority, and investigation steps included in redacted reports
-- Separate installable builds for desktop Chrome and Firefox from one shared source
+- Stable result identities keep workflow states and comparisons attached when evidence wording changes
+- Bounded source, DOM, finding, secret, header, and message processing with visible Scan health notices
+- Combined enforced CSP analysis, separate report-only recognition, and stricter HSTS, framing, referrer, and cookie checks
+- Affected locations in results and reports, with page highlighting where a safe DOM selector is available
+- Subresource Integrity review now covers cross-origin stylesheets as well as scripts
+- Passive results and raw-secret updates must match the active scan, tab, origin, and exact page URL
 
 ## Features
 
 - Actionable Findings and lower-confidence Review clues kept separate
 - Confidence, evidence, and manual verification guidance for every result
+- Stable finding identity separated from mutable report evidence
 - Passive checks for DOM flows, secret patterns, forms, mixed content, headers, cookies, component versions, and source clues
 - Passive route, parameter, form, resource, storage-name, and authentication-surface inventory
 - Passive, Safe Active, Lab, and staged Full Scan modes
@@ -29,6 +31,7 @@ Desktop browser security workspace for controlled passive and safe-active webpag
 - Session-only redacted request log
 - Search and filters for category, confidence, severity, stage, change, and workflow state
 - Secrets hidden throughout the workspace and redacted reports; distinct full values remain available through a separate confirmed export
+- Visible coverage warnings whenever a scanner processing limit is reached
 
 ## Install a packaged build
 
@@ -87,13 +90,13 @@ Active modes show the exact origin, methods, planned request count, and budget b
 
 ## Investigation workflow
 
-Each result has a stable fingerprint. Its investigation view combines the recorded evidence with check-specific impact, remediation, and verification guidance. The priority score is an operational sorting aid based on severity, confidence, and whether the signal is actionable or needs review; it is not a replacement for manual validation.
+Each result has a report fingerprint and a stable identity. The fingerprint describes the current observation; the identity is based on the check and sanitized affected location so a wording or evidence change can be reported as changed. The investigation view combines recorded evidence with check-specific impact, remediation, and verification guidance. The priority score is an operational sorting aid, not a replacement for manual validation.
 
-Workflow states are stored locally against the target and fingerprint. They do not alter the original scanner result or its risk calculation.
+Workflow states are stored locally against the target and stable identity. They do not alter the original scanner result or its risk calculation.
 
 ## Scan comparison
 
-Vulnscan keeps redacted findings for the 12 most recent scans. A completed scan is compared with the newest earlier scan that has the same target fingerprint and check profile. Only stages completed in both scans are compared, so unavailable headers or a stopped active stage are not reported as resolved.
+Vulnscan keeps redacted findings for the 12 most recent scans. Target matching uses the origin, path, and query-parameter names rather than query values. A completed scan is compared with the newest earlier scan that has the same target fingerprint and check profile. Only stages completed in both scans are compared, so unavailable headers or a stopped active stage are not reported as resolved.
 
 ## Data handling
 
@@ -101,7 +104,9 @@ Vulnscan keeps redacted findings for the 12 most recent scans. A completed scan 
 - Raw values are kept in browser session storage, matched to the scan and target URL, and cleared on a new scan, Clear, extension reload/update, or browser exit.
 - Full values remain available after a scan through the separate **Full secret values** export, which requires an extra confirmation.
 - Request logs contain only the method, redacted URL, status, duration, and outcome for the current browser session.
-- Workflow states contain only the target fingerprint, finding fingerprint, state, and update time.
+- Captured Set-Cookie values are replaced before header analysis; only names and attributes are assessed.
+- Workflow states contain only the target fingerprint, finding identity, state, and update time.
+- Scan health records whether source, DOM, finding, or secret collection reached a configured limit.
 - If response headers were not captured for the selected page load, refresh the target tab manually and scan again. Passive mode never reloads it.
 
 ## Browser support

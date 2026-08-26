@@ -1,26 +1,30 @@
-# Vulnscan v6.0.0
+# Vulnscan v6.1.0
 
-Vulnscan v6 turns the dashboard into a focused security investigation workspace while preserving the existing passive and safe-active boundaries.
+Vulnscan v6.1 improves result stability, scan transparency, and extension-side trust boundaries without broadening active behavior.
 
-## Highlights
+## Accuracy
 
-- Redesigned assessment workspace with a professional dark interface and clearer information hierarchy
-- Detailed investigation drawer for every Finding and Review item
-- Check-specific impact, remediation, and investigation guidance
-- Operational priority indicator based on severity, confidence, and result class
-- Local Open, Investigating, Accepted risk, False positive, and Resolved workflow states
-- Investigation context included in redacted Markdown and JSON reports
-- Workflow-state filtering alongside the existing search, severity, category, confidence, stage, and comparison filters
-- Desktop Chrome and Firefox builds generated from the same maintained source
+- Stable finding identities are separate from mutable report fingerprints.
+- Comparisons now classify evidence and detail changes at the same affected location as changed.
+- Enforced CSP headers are evaluated together; report-only policies are shown separately.
+- Header review recognizes disabled HSTS, invalid X-Frame-Options, weak or invalid referrer policies, CSP framing protection, and modern cookie constraints.
+- Cross-origin stylesheet SRI is reviewed alongside script SRI.
 
-## Compatibility
+## Evidence and reliability
 
-- Chrome 102 or newer
-- Firefox 128 or newer on desktop
+- Results can include a sanitized affected location and safe DOM selector.
+- The investigation drawer can highlight an affected element in the selected target tab.
+- Source traversal, DOM inspection, findings, secret exports, captured headers, and incoming message fields have explicit limits.
+- Scan health notices make partial coverage visible whenever a limit is reached.
+
+## Extension hardening
+
+- Passive results and secret-vault updates must match the current scan ID, tab, origin, and exact page URL.
+- Captured cookie values are removed before header analysis.
+- Chrome and Firefox manifests declare the extension-page content security policy explicitly.
 
 ## Safety and privacy
 
-- Raw secret values remain excluded from visible results, history, copied finding briefs, and redacted exports.
-- The separate full-secret export remains available after an explicit confirmation.
-- Active modes remain exact-origin, budgeted, credential-free, and limited to GET, HEAD, and OPTIONS requests.
-- Firefox support does not broaden requested site access or active-scan behavior.
+- Raw secret values remain available only through the separately confirmed full-secret export.
+- Visible results, history, copied text, redacted reports, and request logs remain free of raw secret values.
+- Active modes remain exact-origin, credential-free, budgeted, and limited to GET, HEAD, and OPTIONS requests.

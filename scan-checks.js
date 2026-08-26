@@ -59,7 +59,7 @@
     if (value.startsWith("cookie.")) return "passive.cookies";
     if (value.startsWith("library.")) return "passive.components";
     if (value.startsWith("source.") || value.startsWith("redirect.query-") ||
-        value.startsWith("script.") || value.startsWith("technology.")) return "passive.source";
+        value.startsWith("script.") || value.startsWith("style.") || value.startsWith("technology.")) return "passive.source";
     return null;
   }
 

@@ -35,7 +35,7 @@ test("keeps distinct details and derives risk from findings only", function () {
     type: "Clue",
     detail: "one"
   });
-  const otherReview = model.normalize(Object.assign({}, review, { detail: "two", fingerprint: "" }));
+  const otherReview = model.normalize(Object.assign({}, review, { detail: "two", fingerprint: "", identityFingerprint: "" }));
   assert.equal(model.dedupe([review, otherReview]).length, 2);
   assert.equal(model.risk([review]), "review");
   assert.deepEqual(model.summarize([review]), {
@@ -58,7 +58,7 @@ test("keeps distinct details and derives risk from findings only", function () {
   assert.equal(model.risk([review, finding]), "high");
 });
 
-test("compares findings by stable fingerprint", function () {
+test("compares findings by stable identity", function () {
   const first = model.normalize({
     checkId: "transport.mixed", severity: "medium", confidence: "high", bucket: "finding", type: "Mixed content", detail: "one"
   });
@@ -74,4 +74,29 @@ test("compares findings by stable fingerprint", function () {
   assert.equal(comparison.changed.length, 1);
   assert.equal(comparison.resolved.length, 1);
   assert.equal(comparison.unchanged.length, 0);
+});
+
+test("keeps identity stable when evidence and detail change at the same location", function () {
+  const first = model.normalize({
+    checkId: "header.cookie-flags",
+    severity: "low",
+    confidence: "medium",
+    bucket: "review",
+    type: "Cookie flags need review",
+    detail: "session: missing Secure",
+    evidence: "one missing flag",
+    location: "Set-Cookie: session"
+  });
+  const current = model.normalize(Object.assign({}, first, {
+    fingerprint: "",
+    identityFingerprint: "",
+    detail: "session: missing SameSite",
+    evidence: "a different flag is missing"
+  }));
+  assert.notEqual(first.fingerprint, current.fingerprint);
+  assert.equal(first.identityFingerprint, current.identityFingerprint);
+  const comparison = model.compare([current], [first]);
+  assert.equal(comparison.changed.length, 1);
+  assert.equal(comparison.new.length, 0);
+  assert.equal(comparison.resolved.length, 0);
 });
