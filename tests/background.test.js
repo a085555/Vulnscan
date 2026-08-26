@@ -5,6 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const urlSource = fs.readFileSync(path.join(__dirname, "..", "url-utils.js"), "utf8");
 const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
 const backgroundSource = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
 
@@ -14,6 +15,7 @@ function createWorker(shared) {
   const chrome = {
     webRequest: {
       onBeforeRequest: { addListener: function (listener) { listeners.beforeRequest = listener; } },
+      onBeforeSendHeaders: { addListener: function (listener) { listeners.beforeSendHeaders = listener; } },
       onHeadersReceived: { addListener: function (listener) { listeners.headers = listener; } },
       onBeforeRedirect: { addListener: function (listener) { listeners.redirect = listener; } }
     },
@@ -60,6 +62,7 @@ function createWorker(shared) {
   const context = { chrome: chrome, URL: URL, Date: Date, importScripts: function () {} };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
+  vm.runInContext(urlSource, context);
   vm.runInContext(checkSource, context);
   vm.runInContext(backgroundSource, context);
 
@@ -202,7 +205,7 @@ test("never copies unknown secret fields into local scan storage", async functio
     }]
   }, contentSender(7, "https://example.test/?token=raw-value"));
   assert.equal(JSON.stringify(worker.state.local).includes("raw-value"), false);
-  assert.equal(worker.state.local.lastScan.schemaVersion, 7);
+  assert.equal(worker.state.local.lastScan.schemaVersion, 8);
   assert.equal(worker.state.local.lastScan.scanId, "scan-1");
   assert.match(worker.state.local.lastScan.url, /token=%5Bredacted%5D/);
 });
@@ -262,9 +265,9 @@ test("migrates v2 scans and history without copying unknown fields", function ()
   };
   const worker = createWorker(shared);
   worker.listeners.installed({ reason: "update" });
-  assert.equal(shared.local.lastScan.schemaVersion, 7);
+  assert.equal(shared.local.lastScan.schemaVersion, 8);
   assert.equal(shared.local.lastScan.scanMode, "legacy");
-  assert.equal(shared.local.scanHistory[0].schemaVersion, 7);
+  assert.equal(shared.local.scanHistory[0].schemaVersion, 8);
   assert.equal(JSON.stringify(shared.local).includes("do-not-copy"), false);
 });
 
@@ -302,4 +305,27 @@ test("clears cached headers at navigation and tab lifecycle boundaries", async f
   worker.listeners.removed(4);
   captured = await worker.send({ type: "get_headers", tabId: 4 });
   assert.equal(captured.statusCode, 0);
+});
+
+test("scopes outgoing CORS evidence to the active scan and exact origin", async function () {
+  const worker = createWorker();
+  await worker.send({ type: "scan_begin", scanId: "scan-cors", tabId: 7, origin: "https://example.test" });
+  worker.listeners.beforeSendHeaders({
+    url: "https://other.test/api?__vulnscan_cors=scan-cors",
+    requestHeaders: [{ name: "Origin", value: "chrome-extension://test" }]
+  });
+  let evidence = await worker.send({ type: "get_cors_probe", scanId: "scan-cors" });
+  assert.equal(evidence.observed, false);
+
+  worker.listeners.beforeSendHeaders({
+    url: "https://example.test/api?__vulnscan_cors=scan-cors",
+    requestHeaders: [{ name: "Origin", value: "chrome-extension://test" }]
+  });
+  evidence = await worker.send({ type: "get_cors_probe", scanId: "scan-cors" });
+  assert.deepEqual(JSON.parse(JSON.stringify(evidence)), {
+    observed: true,
+    originSent: true,
+    originMatchesExtension: true,
+    originWasNull: false
+  });
 });

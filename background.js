@@ -1,5 +1,5 @@
 if (typeof importScripts === "function") {
-  importScripts("finding-model.js", "scan-checks.js");
+  importScripts("finding-model.js", "url-utils.js", "scan-checks.js");
 }
 
 const headerCache = {};
@@ -9,43 +9,19 @@ const vaultKey = "secretVault";
 const requestLogKey = "requestLog";
 const scanContextKey = "scanContext";
 const redirectLogKey = "redirectLog";
+const corsProbeKey = "corsProbe";
 
 function comparableUrl(value) {
-  try {
-    const url = new URL(value);
-    url.hash = "";
-    return url.href;
-  } catch (e) {
-    return "";
-  }
+  return VulnscanUrls.comparable(value);
 }
 
 function targetUrl(value) {
-  try {
-    const url = new URL(value);
-    const names = Array.from(new Set(Array.from(url.searchParams.keys()))).sort().slice(0, 100);
-    return url.origin + url.pathname + (names.length ? "?" + names.map(encodeURIComponent).join("&") : "");
-  } catch (e) {
-    return "";
-  }
+  return VulnscanUrls.target(value);
 }
 
 function redactUrl(value) {
-  try {
-    const url = new URL(value);
-    url.username = "";
-    url.password = "";
-    url.hash = "";
-    url.pathname = url.pathname.split("/").map(function (part) {
-      return part.length >= 20 && /^[A-Za-z0-9._~-]+$/.test(part) ? "[redacted]" : part;
-    }).join("/");
-    Array.from(url.searchParams.keys()).forEach(function (name) {
-      url.searchParams.set(name, "[redacted]");
-    });
-    return url.href;
-  } catch (e) {
-    return "";
-  }
+  const redacted = VulnscanUrls.redact(value);
+  return redacted === "[invalid URL]" ? "" : redacted;
 }
 
 function urlFingerprint(value) {
@@ -89,6 +65,7 @@ function cleanFinding(finding) {
     verification: short(item.verification),
     location: short(item.location, 1000),
     selector: short(item.selector, 240),
+    surfaceRefs: Array.isArray(item.surfaceRefs) ? item.surfaceRefs.slice(0, VulnscanFindings.limits.surfaceRefsPerFinding) : [],
     source: "passive",
     occurrences: Math.min(10000, Math.max(1, Number.parseInt(item.occurrences, 10) || 1))
   });
@@ -100,7 +77,8 @@ function cleanScanLimits(value) {
     sourceTruncated: source.sourceTruncated === true,
     domTruncated: source.domTruncated === true,
     findingsTruncated: source.findingsTruncated === true,
-    secretsTruncated: source.secretsTruncated === true
+    secretsTruncated: source.secretsTruncated === true,
+    surfaceTruncated: source.surfaceTruncated === true
   };
 }
 
@@ -128,7 +106,7 @@ function clearVault(callback) {
 }
 
 function clearSessionData(callback) {
-  chrome.storage.session.remove([vaultKey, requestLogKey, scanContextKey, redirectLogKey], function () {
+  chrome.storage.session.remove([vaultKey, requestLogKey, scanContextKey, redirectLogKey, corsProbeKey], function () {
     if (callback) callback();
   });
 }
@@ -173,17 +151,17 @@ function cleanStageSummary(summary, mode) {
 }
 
 function migrateScan(scan) {
-  if (!scan || !scan.url || ![2, 3, 4, 5, 6, 7].includes(scan.schemaVersion)) return null;
+  if (!scan || !scan.url || ![2, 3, 4, 5, 6, 7, 8].includes(scan.schemaVersion)) return null;
   const findings = VulnscanFindings.dedupe(scan.findings || []);
   const mode = ["passive", "safe", "lab", "full"].includes(scan.scanMode) ? scan.scanMode : "legacy";
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     scanId: scan.scanId || null,
     scanMode: mode,
     url: redactUrl(scan.url),
     urlFingerprint: urlFingerprint(scan.url),
     legacyUrlFingerprint: scan.legacyUrlFingerprint || (scan.schemaVersion < 7 ? scan.urlFingerprint : null),
-    vaultFingerprint: scan.schemaVersion === 7 ? scan.vaultFingerprint || null : null,
+    vaultFingerprint: scan.schemaVersion >= 7 ? scan.vaultFingerprint || null : null,
     findings: findings,
     timestamp: scan.timestamp || Date.now(),
     summary: VulnscanFindings.summarize(findings),
@@ -191,7 +169,9 @@ function migrateScan(scan) {
     requestSummary: cleanRequestSummary(scan.requestSummary, mode),
     stageSummary: cleanStageSummary(scan.stageSummary, mode),
     checksRun: VulnscanChecks.effective(scan.checksRun, mode),
-    scanLimits: cleanScanLimits(scan.scanLimits)
+    scanLimits: cleanScanLimits(scan.scanLimits),
+    surface: VulnscanFindings.normalizeSurface(scan.surface),
+    coverage: VulnscanFindings.normalizeCoverage(scan.coverage)
   };
 }
 
@@ -210,7 +190,10 @@ function cleanRequestEntries(entries) {
 function cleanCapturedHeaders(headers) {
   const allowed = new Set([
     "content-security-policy", "content-security-policy-report-only", "strict-transport-security",
-    "x-frame-options", "x-content-type-options", "referrer-policy", "permissions-policy", "set-cookie"
+    "x-frame-options", "x-content-type-options", "referrer-policy", "permissions-policy", "set-cookie",
+    "access-control-allow-origin", "access-control-allow-credentials", "access-control-allow-methods",
+    "access-control-allow-headers", "access-control-expose-headers", "vary",
+    "cross-origin-opener-policy", "cross-origin-embedder-policy", "cross-origin-resource-policy"
   ]);
   return (headers || []).slice(0, 200).reduce(function (result, header) {
     const name = String(header.name || "").toLowerCase().slice(0, 120);
@@ -258,6 +241,45 @@ try {
     { urls: ["<all_urls>"], types: ["main_frame"] },
     ["responseHeaders"]
   );
+}
+
+function captureCorsProbeHeaders(details) {
+  if (!details || !details.url) return;
+  loadScanContext(function (scan) {
+    if (!scan) return;
+    let url;
+    try { url = new URL(details.url); } catch (e) { return; }
+    if (url.origin !== scan.origin || url.searchParams.get("__vulnscan_cors") !== scan.id) return;
+    const originHeader = (details.requestHeaders || []).find(function (header) {
+      return String(header.name || "").toLowerCase() === "origin";
+    });
+    const sent = !!(originHeader && originHeader.value);
+    const extensionOrigin = VulnscanUrls.origin(chrome.runtime.getURL(""));
+    const evidence = {
+      scanId: scan.id,
+      observed: true,
+      originSent: sent,
+      originMatchesExtension: sent && originHeader.value === extensionOrigin,
+      originWasNull: sent && originHeader.value === "null"
+    };
+    chrome.storage.session.set({ [corsProbeKey]: evidence });
+  });
+}
+
+if (chrome.webRequest.onBeforeSendHeaders) {
+  try {
+    chrome.webRequest.onBeforeSendHeaders.addListener(
+      captureCorsProbeHeaders,
+      { urls: ["<all_urls>"], types: ["xmlhttprequest"] },
+      ["requestHeaders", "extraHeaders"]
+    );
+  } catch (error) {
+    chrome.webRequest.onBeforeSendHeaders.addListener(
+      captureCorsProbeHeaders,
+      { urls: ["<all_urls>"], types: ["xmlhttprequest"] },
+      ["requestHeaders"]
+    );
+  }
 }
 
 chrome.webRequest.onBeforeRedirect.addListener(
@@ -318,7 +340,7 @@ chrome.runtime.onInstalled.addListener(function () {
       const history = data.scanHistory.map(function (entry) {
         const mode = ["passive", "safe", "lab", "full"].includes(entry.scanMode) ? entry.scanMode : "legacy";
         return {
-          schemaVersion: 7,
+          schemaVersion: 8,
           scanId: entry.scanId || null,
           url: redactUrl(entry.url),
           urlFingerprint: urlFingerprint(entry.url),
@@ -341,6 +363,8 @@ chrome.runtime.onInstalled.addListener(function () {
           checksRun: VulnscanChecks.effective(entry.checksRun, mode),
           findings: VulnscanFindings.dedupe(entry.findings || []),
           scanLimits: cleanScanLimits(entry.scanLimits),
+          surface: VulnscanFindings.normalizeSurface(entry.surface),
+          coverage: VulnscanFindings.normalizeCoverage(entry.coverage),
           comparisonReady: entry.schemaVersion >= 5 && Array.isArray(entry.findings)
         };
       }).slice(0, 12);
@@ -371,7 +395,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       const mode = ["passive", "safe", "lab", "full"].includes(message.scanMode) ? message.scanMode : "passive";
       chrome.storage.local.set({
         lastScan: {
-          schemaVersion: 7,
+          schemaVersion: 8,
           scanId: message.scanId,
           scanMode: mode,
           url: redactUrl(message.url),
@@ -383,7 +407,9 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
           risk: VulnscanFindings.risk(findings),
           stageSummary: cleanStageSummary(message.stageSummary, mode),
           checksRun: VulnscanChecks.effective(message.checksRun, mode),
-          scanLimits: cleanScanLimits(message.scanLimits)
+          scanLimits: cleanScanLimits(message.scanLimits),
+          surface: VulnscanFindings.normalizeSurface(message.surface),
+          coverage: []
         }
       }, function () {
         sendResponse({ ok: true });
@@ -505,6 +531,20 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         return !message.scanId || entry.scanId === message.scanId;
       });
       sendResponse({ redirects: out });
+    });
+    return true;
+  }
+
+  if (message.type === "get_cors_probe") {
+    chrome.storage.session.get(corsProbeKey, function (data) {
+      const evidence = data[corsProbeKey];
+      const matches = evidence && message.scanId && evidence.scanId === message.scanId;
+      sendResponse(matches ? {
+        observed: evidence.observed === true,
+        originSent: evidence.originSent === true,
+        originMatchesExtension: evidence.originMatchesExtension === true,
+        originWasNull: evidence.originWasNull === true
+      } : { observed: false, originSent: false, originMatchesExtension: false, originWasNull: false });
     });
     return true;
   }

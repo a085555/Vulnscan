@@ -2,16 +2,16 @@
 
 Desktop browser security workspace for controlled passive and safe-active webpage checks.
 
-**Tool by a085** · v6.1.0
+**Tool by a085** · v6.2.0
 
-## What is new in v6.1
+## What is new in v6.2
 
-- Stable result identities keep workflow states and comparisons attached when evidence wording changes
-- Bounded source, DOM, finding, secret, header, and message processing with visible Scan health notices
-- Combined enforced CSP analysis, separate report-only recognition, and stricter HSTS, framing, referrer, and cookie checks
-- Affected locations in results and reports, with page highlighting where a safe DOM selector is available
-- Subresource Integrity review now covers cross-origin stylesheets as well as scripts
-- Passive results and raw-secret updates must match the active scan, tab, origin, and exact page URL
+- Interactive Surface and Scan flow maps connect results to the page surfaces and checks that produced them
+- Guided exploitability sections explain observed evidence, required conditions, likely paths, weakening evidence, and safe lab verification
+- Cross-origin policy review covers CORS, COOP, COEP, and CORP without treating missing optional policies as vulnerabilities
+- One credential-free CORS policy probe records whether the browser sent and the server accepted the exact extension origin
+- Same-origin declared source maps can be confirmed within strict request and response limits
+- JWT review decodes bounded header and expiry metadata without displaying claims or raw token values
 
 ## Features
 
@@ -30,6 +30,8 @@ Desktop browser security workspace for controlled passive and safe-active webpag
 - New, changed, resolved, and unchanged result filters
 - Session-only redacted request log
 - Search and filters for category, confidence, severity, stage, change, and workflow state
+- Searchable interactive scan maps for current and historical scans
+- Plain-language exploitability guidance with non-executable lab templates where a safe reproduction is useful
 - Secrets hidden throughout the workspace and redacted reports; distinct full values remain available through a separate confirmed export
 - Visible coverage warnings whenever a scanner processing limit is reached
 
@@ -74,7 +76,7 @@ The root `manifest.json` remains the Chrome development manifest. Browser-specif
 3. Choose a mode, check families, and request budget.
 4. Run the assessment. The browser may request access to that exact site.
 5. Confirm authorization for Safe Active, Lab, or Full Scan.
-6. Use **Investigate** to review evidence, priority, impact, remediation, and technical context.
+6. Use **Investigate** to review evidence, exploitability conditions, remediation, and technical context, or open the scan map to explore relationships.
 7. Assign a local workflow state and export a redacted report when needed.
 
 Shortcuts: `S` scan · `C` clear · `E` Markdown export
@@ -82,7 +84,7 @@ Shortcuts: `S` scan · `C` clear · `E` Markdown export
 ## Scan modes
 
 - **Passive** analyzes the loaded DOM and captured response headers without scanner-generated network requests or page reloads.
-- **Safe Active** adds controlled same-origin GET, HEAD, and OPTIONS requests for reflection, redirect, and `robots.txt` checks.
+- **Safe Active** adds controlled same-origin GET, HEAD, and OPTIONS requests for reflection, redirects, `robots.txt`, CORS policy evidence, and declared source maps.
 - **Lab** runs budgeted common-path discovery with soft-404 filtering. It is intended for controlled test environments and explicitly authorized targets.
 - **Full Scan** runs Passive, Safe Active, and Lab in sequence under one shared request budget.
 
@@ -90,9 +92,13 @@ Active modes show the exact origin, methods, planned request count, and budget b
 
 ## Investigation workflow
 
-Each result has a report fingerprint and a stable identity. The fingerprint describes the current observation; the identity is based on the check and sanitized affected location so a wording or evidence change can be reported as changed. The investigation view combines recorded evidence with check-specific impact, remediation, and verification guidance. The priority score is an operational sorting aid, not a replacement for manual validation.
+Each result has a report fingerprint and a stable identity. The fingerprint describes the current observation; the identity is based on the check and sanitized affected location so a wording or evidence change can be reported as changed. The investigation view combines recorded evidence with check-specific impact, remediation, exploitability conditions, weakening evidence, and verification guidance. Optional lab templates use harmless markers and reserved example hosts. The priority score is an operational sorting aid, not a replacement for manual validation.
 
 Workflow states are stored locally against the target and stable identity. They do not alter the original scanner result or its risk calculation.
+
+## Scan map
+
+The Surface view links results to bounded observations such as routes, parameter names, forms, resources, external origins, storage names, and authentication clues. The Scan flow view shows which selected stage and check produced each result, including limited or unavailable active-check coverage. Historical v6.2 scans keep their redacted map data; earlier compatible history can still use Scan flow view.
 
 ## Scan comparison
 

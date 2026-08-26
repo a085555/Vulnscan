@@ -10,13 +10,19 @@
     { id: "passive.source", stage: "passive", label: "Source clues", description: "Comments, technology hints, SRI, redirect keys, and sensitive paths" },
     { id: "headers.security", stage: "headers", label: "Security headers", description: "CSP, HSTS, framing, MIME, referrer, and permissions policies" },
     { id: "headers.cookies", stage: "headers", label: "Response cookie flags", description: "Secure, HttpOnly, and SameSite attributes" },
+    { id: "headers.boundaries", stage: "headers", label: "Cross-origin policies", description: "CORS, opener, embedder, and resource policy evidence" },
     { id: "safe.reflection", stage: "safe", label: "Reflection probes", description: "Harmless same-origin query markers" },
     { id: "safe.redirects", stage: "safe", label: "Redirect confirmation", description: "Exact external redirect canary checks" },
     { id: "safe.robots", stage: "safe", label: "robots.txt", description: "Sitemap metadata discovery" },
+    { id: "safe.cors", stage: "safe", label: "CORS origin probe", description: "One credential-free extension-origin policy request" },
+    { id: "safe.source-maps", stage: "safe", label: "Source maps", description: "Declared same-origin map confirmation for up to three scripts" },
     { id: "lab.paths", stage: "lab", label: "Path discovery", description: "Budgeted soft-404-aware common-path checks" }
   ];
 
   const ids = catalog.map(function (check) { return check.id; });
+  const v61Ids = ids.filter(function (id) {
+    return !["headers.boundaries", "safe.cors", "safe.source-maps"].includes(id);
+  });
   const idSet = new Set(ids);
 
   function normalize(selected) {
@@ -60,6 +66,15 @@
     if (value.startsWith("library.")) return "passive.components";
     if (value.startsWith("source.") || value.startsWith("redirect.query-") ||
         value.startsWith("script.") || value.startsWith("style.") || value.startsWith("technology.")) return "passive.source";
+    if (value.startsWith("header.cookie")) return "headers.cookies";
+    if (value.startsWith("header.cors") || value.startsWith("header.coop") || value.startsWith("header.coep") || value.startsWith("header.corp")) return "headers.boundaries";
+    if (value.startsWith("header.")) return "headers.security";
+    if (value === "active.reflection") return "safe.reflection";
+    if (value === "active.open-redirect") return "safe.redirects";
+    if (value === "active.sitemap") return "safe.robots";
+    if (value.startsWith("active.cors")) return "safe.cors";
+    if (value.startsWith("active.source-map")) return "safe.source-maps";
+    if (value === "active.interesting-paths") return "lab.paths";
     return null;
   }
 
@@ -69,6 +84,8 @@
     if (active.includes("safe.reflection")) total += 6;
     if (active.includes("safe.redirects")) total += 6;
     if (active.includes("safe.robots")) total += 1;
+    if (active.includes("safe.cors")) total += 1;
+    if (active.includes("safe.source-maps")) total += 6;
     if (active.includes("lab.paths")) total += 25;
     return total;
   }
@@ -76,6 +93,7 @@
   root.VulnscanChecks = {
     catalog: catalog,
     all: function () { return ids.slice(); },
+    v61All: function () { return v61Ids.slice(); },
     normalize: normalize,
     effective: effective,
     enabled: enabled,

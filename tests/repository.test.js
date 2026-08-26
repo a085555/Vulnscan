@@ -11,10 +11,10 @@ test("manifest and visible version are consistent", function () {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const releaseNotes = fs.readFileSync(path.join(root, "RELEASE_NOTES.md"), "utf8");
   const dashboard = fs.readFileSync(path.join(root, "dashboard.js"), "utf8");
-  assert.equal(manifest.version, "6.1.0");
+  assert.equal(manifest.version, "6.2.0");
   assert.equal(manifest.minimum_chrome_version, "102");
-  assert.match(readme, /v6\.1\.0/);
-  assert.match(releaseNotes, /Vulnscan v6\.1\.0/);
+  assert.match(readme, /v6\.2\.0/);
+  assert.match(releaseNotes, /Vulnscan v6\.2\.0/);
   assert.equal(packageJson.version, manifest.version);
   assert.match(dashboard, /getManifest\(\)\.version/);
   assert.equal(manifest.action.default_popup, undefined);
@@ -23,10 +23,13 @@ test("manifest and visible version are consistent", function () {
   assert.match(html, /request-controller\.js/);
   assert.match(html, /scan-checks\.js/);
   assert.match(html, /finding-guidance\.js/);
+  assert.match(html, /url-utils\.js/);
+  assert.match(html, /scan-map\.js/);
   assert.match(html, /id="fullScanToggle"/);
   assert.match(html, /id="checkPicker"/);
   assert.match(html, /id="comparisonPanel"/);
   assert.match(html, /id="findingDrawer"/);
+  assert.match(html, /id="scanMapDialog"/);
   assert.match(html, /Full Scan/);
 });
 
@@ -37,7 +40,7 @@ test("browser manifests share the release version and use supported background f
   assert.deepEqual(rootManifest, chromeManifest);
   assert.equal(chromeManifest.version, firefoxManifest.version);
   assert.equal(chromeManifest.background.service_worker, "background.js");
-  assert.deepEqual(firefoxManifest.background.scripts, ["finding-model.js", "scan-checks.js", "background.js"]);
+  assert.deepEqual(firefoxManifest.background.scripts, ["finding-model.js", "url-utils.js", "scan-checks.js", "background.js"]);
   assert.equal(firefoxManifest.browser_specific_settings.gecko.strict_min_version, "128.0");
   assert.deepEqual(firefoxManifest.browser_specific_settings.gecko.data_collection_permissions.required, ["none"]);
   assert.equal(firefoxManifest.browser_specific_settings.gecko_android, undefined);
@@ -55,7 +58,7 @@ test("project files contain no unwanted authorship markers", function () {
     ["Chat", "GPT"].join(""),
     ["Co-authored", "-by"].join("")
   ];
-  const files = ["README.md", "RELEASE_NOTES.md", "manifest.json", "background.js", "content.js", "dashboard.html", "dashboard.js", "dashboard.css", "finding-model.js", "finding-guidance.js", "scan-checks.js", "request-controller.js", "scripts/build-browsers.js", "manifests/chrome.json", "manifests/firefox.json"];
+  const files = ["README.md", "RELEASE_NOTES.md", "manifest.json", "background.js", "content.js", "dashboard.html", "dashboard.js", "dashboard.css", "finding-model.js", "finding-guidance.js", "url-utils.js", "scan-map.js", "scan-checks.js", "request-controller.js", "scripts/build-browsers.js", "manifests/chrome.json", "manifests/firefox.json"];
   files.forEach(function (name) {
     const source = fs.readFileSync(path.join(root, name), "utf8");
     blocked.forEach(function (marker) {
@@ -76,4 +79,16 @@ test("passive storage inventory reads names but not values", function () {
   const helper = content.slice(content.indexOf("function readStorageNames"), content.indexOf("function addPassiveInventory"));
   assert.match(helper, /storage\.key/);
   assert.doesNotMatch(helper, /getItem|storage\s*\[/);
+});
+
+test("v6.2 data and active-check invariants remain explicit", function () {
+  const dashboard = fs.readFileSync(path.join(root, "dashboard.js"), "utf8");
+  const content = fs.readFileSync(path.join(root, "content.js"), "utf8");
+  const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  assert.match(dashboard, /reportVersion:\s*"6\.2"/);
+  assert.match(dashboard, /schemaVersion:\s*8/);
+  assert.match(content, /schemaVersion:\s*8/);
+  assert.match(background, /responseMode:\s*"discard"|corsProbeKey/);
+  assert.doesNotMatch(dashboard, /sourcesContent\s*:/);
+  assert.doesNotMatch(content, /payload\.sub|payload\.aud|payload\.iss/);
 });

@@ -100,3 +100,32 @@ test("keeps identity stable when evidence and detail change at the same location
   assert.equal(comparison.new.length, 0);
   assert.equal(comparison.resolved.length, 0);
 });
+
+test("normalizes bounded surface relationships and finding references", function () {
+  const target = model.surfaceId("target", "https://example.test/");
+  const route = model.surfaceId("route", "https://example.test/account");
+  const surface = model.normalizeSurface({
+    nodes: [
+      { id: target, kind: "target", label: "example.test" },
+      { id: route, kind: "route", label: "/account", location: "https://example.test/account" },
+      { id: "invalid", kind: "route", label: "ignored" }
+    ],
+    edges: [
+      { from: target, to: route, relation: "contains" },
+      { from: route, to: "invalid", relation: "loads" }
+    ]
+  });
+  assert.equal(surface.nodes.length, 2);
+  assert.equal(surface.edges.length, 1);
+  const finding = model.normalize({ checkId: "test.surface", surfaceRefs: [route, route, "invalid"] });
+  assert.deepEqual(finding.surfaceRefs, [route]);
+});
+
+test("normalizes active coverage without accepting arbitrary status or notes", function () {
+  const coverage = model.normalizeCoverage([
+    { checkId: "safe.cors", status: "unavailable", inspected: 1, matched: 0, note: "origin-not-observed" },
+    { checkId: "safe.cors", status: "complete", inspected: 2, matched: 2 },
+    { checkId: "unsafe", status: "unknown", note: "raw detail" }
+  ]);
+  assert.deepEqual(coverage, [{ checkId: "safe.cors", status: "unavailable", inspected: 1, matched: 0, note: "origin-not-observed" }]);
+});

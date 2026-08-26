@@ -48,3 +48,22 @@ test("priority reflects severity, confidence, and review status", function () {
   assert.equal(context.score, 0);
   assert.equal(context.label, "Context");
 });
+
+test("exploitability guidance separates evidence, prerequisites, and weakening evidence", function () {
+  const guidance = loadGuidance();
+  const result = guidance.get({ checkId: "active.open-redirect", category: "redirects" }).exploitability;
+  assert.equal(result.level, "demonstrated");
+  assert.equal(result.prerequisites.length > 0, true);
+  assert.equal(result.attackPath.length > 0, true);
+  assert.equal(result.weakens.length > 0, true);
+  assert.match(result.lab.template, /controlled\.example/);
+  assert.doesNotMatch(result.lab.template, /javascript:|<script/i);
+});
+
+test("source-map and JWT guidance avoids treating observations as automatic compromise", function () {
+  const guidance = loadGuidance();
+  const sourceMap = guidance.get({ checkId: "active.source-map", category: "disclosure" }).exploitability;
+  const jwt = guidance.get({ checkId: "secret.jwt.alg-none", category: "authentication" }).exploitability;
+  assert.match(sourceMap.plainLanguage, /not automatically a vulnerability/i);
+  assert.match(jwt.plainLanguage, /only if the server accepts/i);
+});

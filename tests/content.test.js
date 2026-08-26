@@ -5,6 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const urlSource = fs.readFileSync(path.join(__dirname, "..", "url-utils.js"), "utf8");
 const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
 const contentSource = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
 
@@ -36,6 +37,7 @@ function scan(options) {
     },
     chrome: { runtime: { sendMessage: function (message) { messages.push(message); } } },
     URL: URL,
+    atob: function (value) { return Buffer.from(value, "base64").toString("binary"); },
     localStorage: settings.localStorage,
     sessionStorage: settings.sessionStorage,
     __vulnscanScanId: "scan-1",
@@ -44,6 +46,7 @@ function scan(options) {
   };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
+  vm.runInContext(urlSource, context);
   vm.runInContext(checkSource, context);
   vm.runInContext(contentSource, context);
   return messages;
@@ -69,7 +72,7 @@ test("exports every distinct secret while keeping one redacted type finding", fu
   assert.equal(vault.secrets.length, 2);
   assert.equal(new Set(vault.secrets).size, 2);
   assert.equal(vault.scanId, "scan-1");
-  assert.equal(result(messages).schemaVersion, 7);
+  assert.equal(result(messages).schemaVersion, 8);
   assert.equal(result(messages).scanMode, "passive");
 });
 
@@ -101,6 +104,21 @@ test("keeps generic token patterns in review", function () {
   assert.equal(finding.bucket, "review");
   assert.equal(finding.confidence, "low");
   assert.equal(finding.detail.includes(jwt), false);
+});
+
+test("reports bounded JWT metadata without exposing claims or token values", function () {
+  const encode = function (value) {
+    return Buffer.from(JSON.stringify(value)).toString("base64url");
+  };
+  const token = encode({ alg: "none", typ: "JWT" }) + "." + encode({ sub: "private-subject-value" }) + ".";
+  const messages = scan({ html: "<script>const token = '" + token + "';</script>" });
+  const stored = result(messages);
+  assert.equal(stored.findings.some(function (finding) { return finding.checkId === "secret.jwt.alg-none"; }), true);
+  assert.equal(stored.findings.some(function (finding) { return finding.checkId === "secret.jwt.no-expiry"; }), true);
+  assert.doesNotMatch(JSON.stringify(stored), new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(JSON.stringify(stored), /private-subject-value/);
+  const vault = messages.find(function (message) { return message.type === "export_secrets"; });
+  assert.equal(vault.secrets.some(function (value) { return value.includes(token); }), true);
 });
 
 test("runs only selected passive check families", function () {
@@ -198,4 +216,19 @@ test("builds passive intelligence without reading values", function () {
   assert.equal(valueReads, 0);
   assert.doesNotMatch(JSON.stringify(messages), new RegExp(storageValue));
   assert.doesNotMatch(JSON.stringify(result(messages)), /hidden-value/);
+});
+
+test("surface inventory is bounded, linked, and redacts long path values", function () {
+  const rawPathValue = "resetTokenValueThatMustNeverAppear";
+  const link = { tagName: "A", href: "https://example.test/reset/" + rawPathValue + "?next=private" };
+  const messages = scan({
+    nodes: { "a[href], form[action], script[src], link[href], iframe[src]": [link], "form": [] }
+  });
+  const stored = result(messages);
+  assert.equal(stored.surface.nodes.some(function (node) { return node.kind === "target"; }), true);
+  assert.equal(stored.surface.nodes.some(function (node) { return node.kind === "route"; }), true);
+  assert.equal(stored.surface.edges.length > 0, true);
+  assert.equal(stored.findings.some(function (finding) { return finding.surfaceRefs.length > 0; }), true);
+  assert.doesNotMatch(JSON.stringify(stored.surface), new RegExp(rawPathValue));
+  assert.match(JSON.stringify(stored.surface), /\[redacted\]/);
 });

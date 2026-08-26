@@ -5,9 +5,11 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
+const urlSource = fs.readFileSync(path.join(__dirname, "..", "url-utils.js"), "utf8");
 const guidanceSource = fs.readFileSync(path.join(__dirname, "..", "finding-guidance.js"), "utf8");
 const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
 const requestSource = fs.readFileSync(path.join(__dirname, "..", "request-controller.js"), "utf8");
+const mapSource = fs.readFileSync(path.join(__dirname, "..", "scan-map.js"), "utf8");
 const dashboardSource = fs.readFileSync(path.join(__dirname, "..", "dashboard.js"), "utf8");
 
 function createElement(id, attributes) {
@@ -31,6 +33,7 @@ function createElement(id, attributes) {
       toggle: function () {}
     },
     addEventListener: function (name, listener) { element.listeners[name] = listener; },
+    querySelector: function () { return null; },
     querySelectorAll: function () { return []; },
     removeAttribute: function () {},
     getAttribute: function (name) { return element.attributes[name] || null; },
@@ -65,8 +68,8 @@ function createDashboard() {
   modeInputs[2].value = "lab";
   const checkIds = [
     "passive.inventory", "passive.dom", "passive.secrets", "passive.forms", "passive.transport", "passive.cookies",
-    "passive.components", "passive.source", "headers.security", "headers.cookies", "safe.reflection", "safe.redirects",
-    "safe.robots", "lab.paths"
+    "passive.components", "passive.source", "headers.security", "headers.cookies", "headers.boundaries", "safe.reflection", "safe.redirects",
+    "safe.robots", "safe.cors", "safe.source-maps", "lab.paths"
   ];
   const checkToggles = checkIds.map(function (id) {
     const input = createElement("check-" + id);
@@ -91,6 +94,7 @@ function createDashboard() {
   let fetchCount = 0;
   const fetchUrls = [];
   let exportSecretsResponse = { secrets: [], available: false };
+  let corsProbeResponse = { observed: false, originSent: false, originMatchesExtension: false, originWasNull: false };
   let savedRequestLog = { scanId: null, entries: [], summary: null };
   const sentMessages = [];
   const storage = {};
@@ -110,7 +114,8 @@ function createDashboard() {
   const chrome = {
     runtime: {
       lastError: null,
-      getManifest: function () { return { version: "6.1.0" }; },
+      getURL: function (value) { return "chrome-extension://test/" + (value || ""); },
+      getManifest: function () { return { version: "6.2.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -120,6 +125,7 @@ function createDashboard() {
         if (message.type === "get_headers") response = headerResponse;
         if (message.type === "get_redirects") response = { redirects: redirectResponse };
         if (message.type === "get_export_secrets") response = exportSecretsResponse;
+        if (message.type === "get_cors_probe") response = corsProbeResponse;
         if (message.type === "save_request_log") {
           savedRequestLog = { scanId: message.scanId, entries: message.entries, summary: message.summary };
           response = { ok: true };
@@ -160,7 +166,7 @@ function createDashboard() {
       executeScript: async function (options) {
         if (options.files && options.files.includes("content.js")) {
           storage.lastScan = {
-            schemaVersion: 7,
+            schemaVersion: 8,
             scanId: currentScanId,
             scanMode: "passive",
             url: tabResponse.url,
@@ -200,9 +206,11 @@ function createDashboard() {
   };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
+  vm.runInContext(urlSource, context);
   vm.runInContext(guidanceSource, context);
   vm.runInContext(checkSource, context);
   vm.runInContext(requestSource, context);
+  vm.runInContext(mapSource, context);
   vm.runInContext(dashboardSource, context);
   return {
     context: context,
@@ -218,18 +226,20 @@ function createDashboard() {
     setFetch: function (value) { context.fetch = async function () { fetchCount++; fetchUrls.push(String(arguments[0] || "")); return value.apply(null, arguments); }; },
     setTabResponse: function (value) { tabResponse = value; },
     setExportSecrets: function (value) { exportSecretsResponse = value; },
+    setCorsProbe: function (value) { corsProbeResponse = value; },
     getReloadCount: function () { return reloadCount; },
     getFetchCount: function () { return fetchCount; },
     getFetchUrls: function () { return fetchUrls.slice(); }
   };
 }
 
-function response(status, body, ok) {
+function response(status, body, ok, headers) {
   return {
     status: status,
     ok: ok === undefined ? status >= 200 && status < 300 : ok,
+    headers: { get: function (name) { return (headers || {})[String(name).toLowerCase()] || null; } },
     text: async function () { return body || ""; },
-    clone: function () { return response(status, body, ok); }
+    clone: function () { return response(status, body, ok, headers); }
   };
 }
 
@@ -282,6 +292,70 @@ test("evaluates combined CSP policies and modern cookie constraints", function (
   assert.doesNotMatch(JSON.stringify(findings), /raw-cookie-value/);
   assert.match(dashboard.element("headerResults").innerHTML, /2 enforced/);
   assert.match(dashboard.element("headerResults").innerHTML, /CSP Report-Only/);
+});
+
+test("classifies cross-origin response policies without overstating browser behavior", function () {
+  const dashboard = createDashboard();
+  const findings = dashboard.context.analyzeHeaders([
+    { name: "access-control-allow-origin", value: "*" },
+    { name: "access-control-allow-credentials", value: "true" },
+    { name: "cross-origin-opener-policy", value: "same-origin" },
+    { name: "cross-origin-embedder-policy", value: "unexpected" }
+  ], "https://example.test/", ["headers.boundaries"]);
+  const contradictory = findings.find(function (finding) { return finding.checkId === "header.cors.wildcard-credentials"; });
+  assert.equal(contradictory.bucket, "review");
+  assert.match(contradictory.evidence, /reject credentialed reads/i);
+  assert.equal(findings.some(function (finding) { return finding.checkId === "header.coep.invalid"; }), true);
+  assert.equal(findings.some(function (finding) { return /missing/.test(finding.checkId) && /coop|corp/.test(finding.checkId); }), false);
+  assert.match(dashboard.element("headerResults").innerHTML, /status neutral/);
+});
+
+test("reports only a browser-observed exact-origin CORS probe", async function () {
+  const dashboard = createDashboard();
+  dashboard.setCorsProbe({ observed: true, originSent: true, originMatchesExtension: true, originWasNull: false });
+  dashboard.setFetch(async function () {
+    return response(200, "private response must not be retained", true, {
+      "access-control-allow-origin": "chrome-extension://test",
+      "access-control-allow-credentials": "true",
+      "vary": "Origin"
+    });
+  });
+  const findings = await dashboard.context.runActiveChecks("https://example.test/api", "scan-cors", null, {
+    mode: "safe",
+    includeSafe: true,
+    includeLab: false,
+    enabledChecks: ["safe.cors"]
+  });
+  const cors = findings.find(function (finding) { return finding.checkId === "active.cors.origin-accepted"; });
+  assert.equal(cors.bucket, "review");
+  assert.doesNotMatch(JSON.stringify(cors), /private response/);
+  assert.deepEqual(JSON.parse(JSON.stringify(findings.coverage)), [{
+    checkId: "safe.cors", status: "complete", inspected: 1, matched: 1, note: ""
+  }]);
+});
+
+test("confirms only declared same-origin source maps and retains metadata only", async function () {
+  const dashboard = createDashboard();
+  const rawSource = "source-content-must-not-be-retained";
+  dashboard.setFetch(async function (value) {
+    const url = new URL(value);
+    if (url.pathname === "/assets/app.js") return response(200, "console.log(1);\n//# sourceMappingURL=app.js.map");
+    if (url.pathname === "/assets/app.js.map") return response(200, JSON.stringify({ version: 3, sources: ["src/app.js"], sourcesContent: [rawSource] }));
+    return response(404, "");
+  });
+  const findings = await dashboard.context.runActiveChecks("https://example.test/", "scan-map", null, {
+    mode: "safe",
+    includeSafe: true,
+    includeLab: false,
+    enabledChecks: ["safe.source-maps"],
+    sourceMapCandidates: { urls: ["https://example.test/assets/app.js"], total: 1, truncated: false }
+  });
+  const map = findings.find(function (finding) { return finding.checkId === "active.source-map"; });
+  assert.equal(map.bucket, "review");
+  assert.match(map.detail, /1 source reference/);
+  assert.doesNotMatch(JSON.stringify(findings), new RegExp(rawSource));
+  assert.equal(dashboard.getFetchCount(), 2);
+  assert.equal(findings.coverage[0].status, "complete");
 });
 
 test("shows INFO for informational findings and OK only for an empty scan", function () {
@@ -362,7 +436,7 @@ test("passive mode sends no scanner requests or target reloads", async function 
   await dashboard.context.runScan();
   assert.equal(dashboard.getReloadCount(), 0);
   assert.equal(dashboard.getFetchCount(), 0);
-  assert.equal(dashboard.storage.lastScan.schemaVersion, 7);
+  assert.equal(dashboard.storage.lastScan.schemaVersion, 8);
   assert.equal(dashboard.storage.lastScan.scanMode, "passive");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_begin"; }), true);
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_end"; }), true);
@@ -381,9 +455,9 @@ test("safe active mode requires confirmation and uses its request budget", async
   dashboard.element("authorizationCheck").listeners.change();
   dashboard.element("authorizationStart").listeners.click();
   await scan;
-  assert.equal(dashboard.getFetchCount(), 13);
+  assert.equal(dashboard.getFetchCount(), 14);
   assert.equal(dashboard.storage.lastScan.scanMode, "safe");
-  assert.equal(dashboard.storage.lastScan.requestSummary.attempted, 13);
+  assert.equal(dashboard.storage.lastScan.requestSummary.attempted, 14);
 });
 
 test("Full Scan runs Safe Active and Lab once under one shared budget", async function () {
@@ -551,7 +625,7 @@ test("redacted reports never include raw secret values", function () {
   dashboard.setExportSecrets({ secrets: [raw], available: true });
   assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
   assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
-  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.1");
+  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.2");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
 
   dashboard.element("exportSecretsBtn").listeners.click();

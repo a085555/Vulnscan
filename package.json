@@ -1,9 +1,9 @@
 {
   "name": "vulnscan-extension",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "private": true,
   "scripts": {
-    "check": "node --check finding-model.js && node --check finding-guidance.js && node --check scan-checks.js && node --check request-controller.js && node --check background.js && node --check content.js && node --check dashboard.js && node --check scripts/build-browsers.js",
+    "check": "node --check finding-model.js && node --check url-utils.js && node --check finding-guidance.js && node --check scan-checks.js && node --check request-controller.js && node --check scan-map.js && node --check background.js && node --check content.js && node --check dashboard.js && node --check scripts/build-browsers.js",
     "test": "node --test",
     "build": "node scripts/build-browsers.js",
     "verify": "npm run check && npm test && npm run build"

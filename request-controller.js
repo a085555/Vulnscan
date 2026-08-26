@@ -15,29 +15,19 @@
   }
 
   function safeOrigin(value) {
-    try { return new URL(value).origin; } catch (e) { return ""; }
+    return VulnscanUrls.origin(value);
   }
 
   function safeUrl(value) {
-    try {
-      const url = new URL(value);
-      url.username = "";
-      url.password = "";
-      url.hash = "";
-      url.pathname = url.pathname.split("/").map(function (part) {
-        return part.length >= 20 && /^[A-Za-z0-9._~-]+$/.test(part) ? "[redacted]" : part;
-      }).join("/");
-      Array.from(url.searchParams.keys()).forEach(function (name) {
-        url.searchParams.set(name, "[redacted]");
-      });
-      return url.href;
-    } catch (e) {
-      return "[invalid URL]";
-    }
+    return VulnscanUrls.redact(value);
   }
 
-  async function readLimitedText(response, limit, method) {
+  async function readLimitedText(response, limit, method, responseMode) {
     if (method === "HEAD") return "";
+    if (responseMode === "discard") {
+      if (response.body && typeof response.body.cancel === "function") await response.body.cancel();
+      return "";
+    }
     const headerValue = response.headers && response.headers.get ? response.headers.get("content-length") : "";
     const contentLength = Number.parseInt(headerValue || "", 10);
     if (Number.isFinite(contentLength) && contentLength > limit) {
@@ -145,7 +135,7 @@
           signal: controller.signal
         });
         status = Number(response.status) || 0;
-        body = await readLimitedText(response, maxResponseBytes, method);
+        body = await readLimitedText(response, maxResponseBytes, method, requestOptions.responseMode);
         outcome = "complete";
         completed++;
 

@@ -52,7 +52,8 @@
     sourceTruncated: sourceSnapshot.truncated,
     domTruncated: false,
     findingsTruncated: false,
-    secretsTruncated: false
+    secretsTruncated: false,
+    surfaceTruncated: false
   };
 
   function checkEnabled(id) {
@@ -89,26 +90,13 @@
       location: item.location,
       selector: item.selector,
       source: "passive",
+      surfaceRefs: item.surfaceRefs,
       occurrences: item.occurrences
     }));
   }
 
   function redactUrl(value) {
-    try {
-      const url = new URL(value, pageUrl);
-      url.username = "";
-      url.password = "";
-      url.hash = "";
-      url.pathname = url.pathname.split("/").map(function (part) {
-        return part.length >= 20 && /^[A-Za-z0-9._~-]+$/.test(part) ? "[redacted]" : part;
-      }).join("/");
-      Array.from(url.searchParams.keys()).forEach(function (name) {
-        url.searchParams.set(name, "[redacted]");
-      });
-      return url.href;
-    } catch (e) {
-      return "[invalid URL]";
-    }
+    return VulnscanUrls.redact(value, pageUrl);
   }
 
   function safeName(value) {
@@ -152,6 +140,57 @@
     return Array.from(new Set(values.filter(Boolean))).slice(0, limit);
   }
 
+  const surfaceNodes = [];
+  const surfaceEdges = [];
+  const surfaceNodeIds = new Set();
+  const surfaceEdgeIds = new Set();
+  const elementSurfaceRefs = typeof WeakMap === "function" ? new WeakMap() : null;
+  const targetSurfaceId = VulnscanFindings.surfaceId("target", VulnscanUrls.target(pageUrl));
+
+  function addSurfaceNode(kind, value, label, options) {
+    const item = options || {};
+    const id = VulnscanFindings.surfaceId(kind, value);
+    if (surfaceNodeIds.has(id)) return id;
+    if (surfaceNodes.length >= limits.surfaceNodes) {
+      scanLimits.surfaceTruncated = true;
+      return "";
+    }
+    surfaceNodeIds.add(id);
+    surfaceNodes.push({
+      id: id,
+      kind: kind,
+      label: label,
+      detail: item.detail || "",
+      location: item.location || "",
+      selector: item.selector || "",
+      external: item.external === true,
+      occurrences: item.occurrences || 1
+    });
+    return id;
+  }
+
+  function addSurfaceEdge(from, to, relation) {
+    if (!from || !to || from === to) return;
+    const key = from + "|" + to + "|" + relation;
+    if (surfaceEdgeIds.has(key)) return;
+    if (surfaceEdges.length >= limits.surfaceEdges) {
+      scanLimits.surfaceTruncated = true;
+      return;
+    }
+    surfaceEdgeIds.add(key);
+    surfaceEdges.push({ from: from, to: to, relation: relation });
+  }
+
+  function rememberSurface(element, id) {
+    if (elementSurfaceRefs && element && id) elementSurfaceRefs.set(element, id);
+    return id;
+  }
+
+  function refsFor(element, fallback) {
+    const id = elementSurfaceRefs && element ? elementSurfaceRefs.get(element) : "";
+    return [id || fallback].filter(function (value) { return surfaceNodeIds.has(value); });
+  }
+
   function readStorageNames(storage) {
     const names = [];
     try {
@@ -164,23 +203,82 @@
     const endpoints = [];
     const parameterNames = [];
     const thirdPartyHosts = [];
+    const routeRefs = [];
+    const parameterRefs = [];
+    const formRefs = [];
+    const resourceRefs = [];
+    const externalRefs = [];
+    const storageRefs = [];
+    const authRefs = [];
     let scriptCount = 0;
     let styleCount = 0;
     let frameCount = 0;
 
+    addSurfaceNode("target", VulnscanUrls.target(pageUrl), new URL(pageUrl).hostname, {
+      detail: "Selected page",
+      location: redactUrl(pageUrl)
+    });
+
     try {
       const current = new URL(pageUrl);
-      current.searchParams.forEach(function (value, name) { parameterNames.push(safeName(name)); });
+      current.searchParams.forEach(function (value, name) {
+        const safe = safeName(name);
+        parameterNames.push(safe);
+        if (safe) {
+          const ref = addSurfaceNode("parameter", "query|" + safe, safe, { detail: "Query parameter name", location: "query: " + safe });
+          parameterRefs.push(ref);
+          addSurfaceEdge(targetSurfaceId, ref, "uses");
+        }
+      });
       selectedNodes("a[href], form[action], script[src], link[href], iframe[src]").forEach(function (element) {
         const value = element.href || element.action || element.src;
         if (!value) return;
         let target;
         try { target = new URL(value, pageUrl); } catch (e) { return; }
         if (!/^https?:$/.test(target.protocol)) return;
-        target.searchParams.forEach(function (value, name) { parameterNames.push(safeName(name)); });
-        if (target.origin === current.origin) endpoints.push(redactUrl(target.href));
-        else thirdPartyHosts.push(target.hostname);
         const tag = String(element.tagName || "").toLowerCase();
+        target.searchParams.forEach(function (value, name) {
+          const safe = safeName(name);
+          parameterNames.push(safe);
+          if (safe) {
+            const ref = addSurfaceNode("parameter", "observed|" + safe, safe, { detail: "Query or form parameter name", location: "parameter: " + safe });
+            parameterRefs.push(ref);
+            addSurfaceEdge(targetSurfaceId, ref, "uses");
+          }
+        });
+        if (target.origin === current.origin) {
+          const safeTarget = redactUrl(target.href);
+          endpoints.push(safeTarget);
+          if (tag === "a") {
+            let routeLabel = "/";
+            try { routeLabel = new URL(safeTarget).pathname || "/"; } catch (e) {}
+            const route = addSurfaceNode("route", safeTarget, routeLabel, { detail: "Observed same-origin link", location: safeTarget, selector: elementSelector(element) });
+            routeRefs.push(route);
+            rememberSurface(element, route);
+            addSurfaceEdge(targetSurfaceId, route, "contains");
+          }
+        } else {
+          thirdPartyHosts.push(target.hostname);
+          const external = addSurfaceNode("external-origin", target.origin, target.hostname, { detail: "Observed external origin", location: target.origin, external: true });
+          externalRefs.push(external);
+          addSurfaceEdge(targetSurfaceId, external, "connects");
+        }
+        if (tag === "script" || tag === "link" || tag === "iframe") {
+          const kind = tag === "link" ? "stylesheet" : tag;
+          const safeResource = redactUrl(target.href);
+          let resourceLabel = kind;
+          try { resourceLabel = new URL(safeResource).pathname.split("/").pop() || kind; } catch (e) {}
+          const resource = addSurfaceNode("resource", kind + "|" + safeResource, resourceLabel, {
+            detail: kind + (target.origin === current.origin ? " · same origin" : " · external"),
+            location: safeResource,
+            selector: elementSelector(element),
+            external: target.origin !== current.origin
+          });
+          resourceRefs.push(resource);
+          rememberSurface(element, resource);
+          const external = target.origin === current.origin ? targetSurfaceId : VulnscanFindings.surfaceId("external-origin", target.origin);
+          addSurfaceEdge(external, resource, "loads");
+        }
         if (tag === "script") scriptCount++;
         if (tag === "link" && String(element.rel || "").toLowerCase().includes("stylesheet")) styleCount++;
         if (tag === "iframe") frameCount++;
@@ -191,13 +289,29 @@
     let postForms = 0;
     let passwordForms = 0;
     let fileForms = 0;
-    forms.forEach(function (form) {
+    forms.forEach(function (form, index) {
       if (String(form.method || "get").toLowerCase() === "post") postForms++;
+      const method = String(form.method || "get").toUpperCase();
+      const safeAction = redactUrl(form.action || pageUrl);
+      const formRef = addSurfaceNode("form", method + "|" + safeAction + "|" + index, method + " form", {
+        detail: "Submission to " + safeAction,
+        location: safeAction,
+        selector: elementSelector(form)
+      });
+      formRefs.push(formRef);
+      rememberSurface(form, formRef);
+      addSurfaceEdge(targetSurfaceId, formRef, "contains");
       try {
         if (form.querySelector("input[type='password']")) passwordForms++;
         if (form.querySelector("input[type='file']")) fileForms++;
         form.querySelectorAll("input[name], select[name], textarea[name], button[name]").forEach(function (field) {
-          parameterNames.push(safeName(field.name));
+          const safe = safeName(field.name);
+          parameterNames.push(safe);
+          if (safe) {
+            const ref = addSurfaceNode("parameter", "field|" + safe, safe, { detail: "Form field name", location: "field: " + safe });
+            parameterRefs.push(ref);
+            addSurfaceEdge(formRef, ref, "uses");
+          }
         });
       } catch (e) {}
     });
@@ -212,6 +326,7 @@
         evidence: "Routes: " + endpointList.join(", ") + ". Query values are hidden.",
         verification: "Review the routes as a coverage map and confirm which ones are intended to be public.",
         location: "current page",
+        surfaceRefs: unique(routeRefs, 8),
         occurrences: endpointList.length
       });
     }
@@ -226,6 +341,7 @@
         evidence: parameters.length + " unique query or form field name(s) were observed. Values were not collected.",
         verification: "Use the names to check validation, authorization, and server-side handling on approved targets.",
         location: "current page",
+        surfaceRefs: unique(parameterRefs, 8),
         occurrences: parameters.length
       });
     }
@@ -239,6 +355,7 @@
         evidence: "Only form methods and field types were counted; field values were not read.",
         verification: "Review sensitive forms for access control, anti-CSRF handling, validation, and secure transport.",
         location: "current page",
+        surfaceRefs: unique(formRefs, 8),
         occurrences: forms.length
       });
     }
@@ -253,12 +370,23 @@
         evidence: thirdParties.length ? "Third-party hosts: " + thirdParties.join(", ") : "No third-party hosts were observed in the mapped elements.",
         verification: "Confirm each external dependency and embedded origin is expected and still required.",
         location: "current page",
+        surfaceRefs: unique(resourceRefs.concat(externalRefs), 8),
         occurrences: scriptCount + styleCount + frameCount
       });
     }
 
     const localNames = typeof localStorage === "undefined" ? [] : readStorageNames(localStorage);
     const sessionNames = typeof sessionStorage === "undefined" ? [] : readStorageNames(sessionStorage);
+    localNames.forEach(function (name) {
+      const ref = addSurfaceNode("storage", "local|" + name, name, { detail: "localStorage key name", location: "localStorage" });
+      storageRefs.push(ref);
+      addSurfaceEdge(targetSurfaceId, ref, "uses");
+    });
+    sessionNames.forEach(function (name) {
+      const ref = addSurfaceNode("storage", "session|" + name, name, { detail: "sessionStorage key name", location: "sessionStorage" });
+      storageRefs.push(ref);
+      addSurfaceEdge(targetSurfaceId, ref, "uses");
+    });
     if (localNames.length || sessionNames.length) {
       add("info", "Browser storage names", "localStorage: " + (localNames.join(", ") || "none") + "; sessionStorage: " + (sessionNames.join(", ") || "none"), {
         checkId: "inventory.storage-names",
@@ -268,6 +396,7 @@
         evidence: "Storage key names were read. Storage values were never accessed.",
         verification: "Review whether the named entries are necessary and whether sensitive state is stored in the browser.",
         location: "browser storage",
+        surfaceRefs: unique(storageRefs, 8),
         occurrences: localNames.length + sessionNames.length
       });
     }
@@ -276,6 +405,16 @@
       const name = safeName(cookie.trim().split("=")[0]);
       return /auth|session|token|login|sid/i.test(name) ? name : "";
     }), 12) : [];
+    if (passwordForms) {
+      const ref = addSurfaceNode("authentication", "password-forms", "Password forms", { detail: passwordForms + " password form(s)", location: "current page", occurrences: passwordForms });
+      authRefs.push(ref);
+      addSurfaceEdge(targetSurfaceId, ref, "contains");
+    }
+    authCookies.forEach(function (name) {
+      const ref = addSurfaceNode("authentication", "cookie|" + name, name, { detail: "Authentication-style cookie name", location: "document.cookie" });
+      authRefs.push(ref);
+      addSurfaceEdge(targetSurfaceId, ref, "uses");
+    });
     if (passwordForms || authCookies.length) {
       add("info", "Authentication surface clues", passwordForms + " password form(s), " + authCookies.length + " authentication-style cookie name(s)", {
         checkId: "inventory.authentication",
@@ -285,10 +424,13 @@
         evidence: authCookies.length ? "Cookie names: " + authCookies.join(", ") + ". Cookie values were not collected." : "Password fields were observed; no cookie values were collected.",
         verification: "Review login, recovery, session rotation, logout, and reauthentication behavior manually.",
         location: "current page",
+        surfaceRefs: unique(authRefs, 8),
         occurrences: passwordForms + authCookies.length
       });
     }
   }
+
+  if (checkEnabled("passive.inventory")) addPassiveInventory();
 
   const sinks = [
     "innerHTML", "outerHTML", "document.write", "document.writeln", "eval(",
@@ -307,8 +449,96 @@
       evidence: foundSinks.length + " sink name(s) appear in the serialized page source.",
       verification: "Trace whether data controlled by the URL, storage, messages, or user input reaches any listed sink.",
       location: "serialized page source",
+      surfaceRefs: refsFor(null, targetSurfaceId),
       occurrences: foundSinks.length
     });
+  }
+
+  function decodeJwtPart(value) {
+    if (!value || value.length > 4096 || typeof atob !== "function") return null;
+    try {
+      const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
+      const binary = atob(padded);
+      let escaped = "";
+      for (let i = 0; i < binary.length; i++) escaped += "%" + binary.charCodeAt(i).toString(16).padStart(2, "0");
+      const parsed = JSON.parse(decodeURIComponent(escaped));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function inspectJwtValues(values) {
+    const metadata = { decoded: 0, none: 0, noExpiry: 0, invalidExpiry: 0, malformed: 0, algorithms: new Set() };
+    values.slice(0, 20).forEach(function (token) {
+      const parts = token.split(".");
+      const header = decodeJwtPart(parts[0]);
+      const payload = decodeJwtPart(parts[1]);
+      if (!header || !payload) {
+        metadata.malformed++;
+        return;
+      }
+      metadata.decoded++;
+      const algorithm = typeof header.alg === "string" && /^[A-Za-z0-9_-]{1,24}$/.test(header.alg) ? header.alg : "unrecognized";
+      metadata.algorithms.add(algorithm);
+      if (algorithm.toLowerCase() === "none") metadata.none++;
+      if (!Object.prototype.hasOwnProperty.call(payload, "exp")) metadata.noExpiry++;
+      else if (!Number.isFinite(Number(payload.exp))) metadata.invalidExpiry++;
+    });
+    const refs = refsFor(null, targetSurfaceId);
+    const algorithmText = Array.from(metadata.algorithms).sort().join(", ") || "not decoded";
+    if (metadata.none) {
+      add("medium", "JWT declares no signing algorithm", metadata.none + " token(s) use alg=none; values remain hidden.", {
+        checkId: "secret.jwt.alg-none",
+        confidence: "high",
+        bucket: "review",
+        category: "authentication",
+        evidence: "Decoded JWT metadata declared alg=none. No signature or claim value was displayed.",
+        verification: "Confirm whether the server accepts this token type and rejects unsigned tokens on every protected endpoint.",
+        location: "serialized page source",
+        surfaceRefs: refs,
+        occurrences: metadata.none
+      });
+    }
+    if (metadata.noExpiry) {
+      add("low", "JWT has no expiry claim", metadata.noExpiry + " decoded token(s) omit exp; algorithms: " + algorithmText + ".", {
+        checkId: "secret.jwt.no-expiry",
+        confidence: "medium",
+        bucket: "review",
+        category: "authentication",
+        evidence: "Only standard claim presence and algorithm names were inspected; claim values remain hidden.",
+        verification: "Determine the token purpose and confirm whether server-side expiry or revocation provides an equivalent lifetime control.",
+        location: "serialized page source",
+        surfaceRefs: refs,
+        occurrences: metadata.noExpiry
+      });
+    }
+    if (metadata.invalidExpiry) {
+      add("low", "JWT expiry claim is not numeric", metadata.invalidExpiry + " decoded token(s) contain a non-numeric exp claim.", {
+        checkId: "secret.jwt.invalid-expiry",
+        confidence: "high",
+        bucket: "review",
+        category: "authentication",
+        evidence: "The exp claim type was inspected without retaining its value.",
+        verification: "Confirm how the token library parses exp and whether invalid values are rejected.",
+        location: "serialized page source",
+        surfaceRefs: refs,
+        occurrences: metadata.invalidExpiry
+      });
+    }
+    if (metadata.malformed) {
+      add("info", "JWT metadata could not be decoded", metadata.malformed + " token-like value(s) were malformed or exceeded decoding limits.", {
+        checkId: "secret.jwt.malformed",
+        confidence: "medium",
+        bucket: "review",
+        category: "authentication",
+        evidence: "The scanner stopped at bounded base64url and JSON decoding; raw values remain hidden.",
+        verification: "Confirm whether the value is a JWT before drawing conclusions from it.",
+        location: "serialized page source",
+        surfaceRefs: refs,
+        occurrences: metadata.malformed
+      });
+    }
   }
 
   const secretPatterns = [
@@ -326,7 +556,7 @@
     { name: "Private key block", re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, bucket: "finding", confidence: "high" },
     { name: "Password assignment", re: /password\s*[:=]\s*['"][^'"\r\n]{3,}['"]/gi, bucket: "review", confidence: "low" },
     { name: "Generic API key", re: /api[_-]?key['"]?\s*[:=]\s*['"][a-zA-Z0-9_\-]{16,}/gi, bucket: "review", confidence: "low" },
-    { name: "JWT", re: /eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g, bucket: "review", confidence: "low" }
+    { name: "JWT", re: /eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]*/g, bucket: "review", confidence: "low" }
   ];
 
   const secretVault = [];
@@ -358,8 +588,10 @@
       evidence: values.length + " distinct value" + (values.length === 1 ? "" : "s") + " matched the " + pattern.name + " pattern. Values are redacted here.",
       verification: "Confirm whether the value is active, scoped appropriately, and safe to expose in client-delivered source.",
       location: "serialized page source",
+      surfaceRefs: refsFor(null, targetSurfaceId),
       occurrences: values.length
     });
+    if (pattern.name === "JWT") inspectJwtValues(values);
   });
 
   selectedNodes("form").forEach(function (form) {
@@ -377,7 +609,8 @@
           evidence: "A POST form has no obvious CSRF or nonce input.",
           verification: "Check server-side SameSite, Origin/Referer, and CSRF-token validation before treating this as vulnerable.",
           location: safeAction,
-          selector: elementSelector(form)
+          selector: elementSelector(form),
+          surfaceRefs: refsFor(form, targetSurfaceId)
         });
       }
     }
@@ -390,7 +623,8 @@
         evidence: "An HTTPS page contains a form action using plain HTTP.",
         verification: "Submit only in a safe test environment and confirm the browser sends the form over an unencrypted connection.",
         location: safeAction,
-        selector: elementSelector(form)
+        selector: elementSelector(form),
+        surfaceRefs: refsFor(form, targetSurfaceId)
       });
     }
     try {
@@ -404,13 +638,12 @@
           evidence: "The form action host differs from the current page host.",
           verification: "Confirm that the destination is an expected and trusted service.",
           location: safeAction,
-          selector: elementSelector(form)
+          selector: elementSelector(form),
+          surfaceRefs: refsFor(form, targetSurfaceId)
         });
       }
     } catch (e) {}
   });
-
-  if (checkEnabled("passive.inventory")) addPassiveInventory();
 
   selectedNodes("img, script, link, iframe, source, video, audio, embed, object").forEach(function (element) {
     const source = element.src || element.href || element.data;
@@ -423,7 +656,8 @@
         evidence: "An HTTPS page references a resource over plain HTTP.",
         verification: "Confirm the request is not upgraded or blocked and replace it with an HTTPS resource.",
         location: redactUrl(source),
-        selector: elementSelector(element)
+        selector: elementSelector(element),
+        surfaceRefs: refsFor(element, targetSurfaceId)
       });
     }
   });
@@ -441,6 +675,7 @@
         evidence: cookieNames.length + " cookie name(s) are exposed through document.cookie.",
         verification: "Determine whether any listed cookie carries authentication or other sensitive state that should use HttpOnly.",
         location: "document.cookie",
+        surfaceRefs: refsFor(null, targetSurfaceId),
         occurrences: cookieNames.length
       });
     }
@@ -465,7 +700,8 @@
       category: "components",
       evidence: "A source reference resembles a versioned " + library.name + " asset.",
       verification: "Confirm the loaded version in browser developer tools and compare it with the vendor's supported releases.",
-      location: library.name
+      location: library.name,
+      surfaceRefs: refsFor(null, targetSurfaceId)
     });
   });
 
@@ -485,7 +721,8 @@
       category: "source",
       evidence: "Matching text appears in the serialized page source.",
       verification: "Inspect the original source context and confirm whether the text exposes useful internal information.",
-      location: "serialized page source"
+      location: "serialized page source",
+      surfaceRefs: refsFor(null, targetSurfaceId)
     });
   });
 
@@ -506,6 +743,11 @@
         evidence: "The current URL contains " + matchedParams.length + " exact redirect-style query key" + (matchedParams.length === 1 ? "" : "s") + ".",
         verification: "Change the parameter to a controlled external HTTPS destination and confirm whether the application redirects there.",
         location: "query: " + matchedParams.join(", "),
+        surfaceRefs: unique(matchedParams.map(function (name) {
+          const direct = VulnscanFindings.surfaceId("parameter", "query|" + name);
+          const observed = VulnscanFindings.surfaceId("parameter", "observed|" + name);
+          return surfaceNodeIds.has(direct) ? direct : observed;
+        }), 8),
         occurrences: matchedParams.length
       });
     }
@@ -526,7 +768,8 @@
       evidence: "A Content-Security-Policy meta element was found. Directive values were not retained.",
       verification: "Compare it with the response headers. Remember that frame-ancestors is not enforced when delivered through a meta element.",
       location: "meta http-equiv=Content-Security-Policy",
-      selector: elementSelector(meta)
+      selector: elementSelector(meta),
+      surfaceRefs: refsFor(meta, targetSurfaceId)
     });
   });
 
@@ -543,7 +786,8 @@
           evidence: "A cross-origin " + (isStylesheet ? "stylesheet" : "script") + " element has no integrity attribute.",
           verification: "Confirm that the resource is immutable and whether Subresource Integrity is appropriate for this deployment.",
           location: redactUrl(source.href),
-          selector: elementSelector(element)
+          selector: elementSelector(element),
+          surfaceRefs: refsFor(element, targetSurfaceId)
         });
       }
     } catch (e) {}
@@ -572,7 +816,8 @@
       category: "recon",
       evidence: "Names or asset paths associated with these technologies appear in the page.",
       verification: "Confirm each technology from response headers, loaded assets, or framework-specific runtime markers.",
-      location: "current page"
+      location: "current page",
+      surfaceRefs: refsFor(null, targetSurfaceId)
     });
   }
 
@@ -589,6 +834,7 @@
       evidence: "Potentially sensitive file or path names appear in the page source.",
       verification: "Check whether the referenced paths are reachable and return content distinct from the site's normal not-found response.",
       location: "serialized page source",
+      surfaceRefs: refsFor(null, targetSurfaceId),
       occurrences: foundHints.length
     });
   }
@@ -604,6 +850,7 @@
       verification: "Review whether untrusted values can enter these handlers or whether CSP blocks their execution.",
       location: "inline event attributes",
       selector: elementSelector(inlineEvents[0]),
+      surfaceRefs: refsFor(inlineEvents[0], targetSurfaceId),
       occurrences: inlineEvents.length
     });
   }
@@ -694,6 +941,7 @@
       verification: "Trace the complete data flow and test with a harmless marker to determine whether encoding or sanitization blocks execution.",
       location: "inline script",
       selector: flowSelector,
+      surfaceRefs: refsFor(null, targetSurfaceId),
       occurrences: uniqueFlows.length
     });
   }
@@ -703,6 +951,7 @@
   if (scanLimits.domTruncated) limitNotes.push("DOM element processing limit reached");
   if (scanLimits.findingsTruncated) limitNotes.push("finding limit reached");
   if (scanLimits.secretsTruncated) limitNotes.push("secret export limit reached");
+  if (scanLimits.surfaceTruncated) limitNotes.push("surface map collection limit reached");
   if (limitNotes.length) {
     findings.push(VulnscanFindings.normalize({
       checkId: "scan.limits",
@@ -722,7 +971,7 @@
   const normalizedFindings = VulnscanFindings.dedupe(findings);
   chrome.runtime.sendMessage({
     type: "scan_results",
-    schemaVersion: 7,
+    schemaVersion: 8,
     scanId: scanId,
     scanMode: scanMode,
     checksRun: VulnscanChecks.effective(enabledChecks, scanMode),
@@ -730,7 +979,8 @@
     findings: normalizedFindings,
     summary: VulnscanFindings.summarize(normalizedFindings),
     risk: VulnscanFindings.risk(normalizedFindings),
-    scanLimits: scanLimits
+    scanLimits: scanLimits,
+    surface: VulnscanFindings.normalizeSurface({ nodes: surfaceNodes, edges: surfaceEdges, truncated: scanLimits.surfaceTruncated })
   });
 
   if (secretVault.length) {

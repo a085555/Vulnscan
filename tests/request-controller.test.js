@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+require("../url-utils.js");
 require("../request-controller.js");
 
 const requests = globalThis.VulnscanRequests;
@@ -80,4 +81,26 @@ test("times out, caps response bodies, and redacts request logs", async function
     fetchFn: async function () { return response(200, "this body is too long"); }
   });
   assert.equal((await capped.request("https://example.test/large")).outcome, "response-too-large");
+});
+
+test("can discard a response body without retaining or decoding it", async function () {
+  let cancelled = false;
+  let textRead = false;
+  const controller = requests.create({
+    mode: "safe",
+    origin: "https://example.test",
+    fetchFn: async function () {
+      return {
+        status: 200,
+        ok: true,
+        headers: { get: function () { return null; } },
+        body: { cancel: async function () { cancelled = true; } },
+        text: async function () { textRead = true; return "sensitive body"; }
+      };
+    }
+  });
+  const result = await controller.request("https://example.test/cors", { responseMode: "discard" });
+  assert.equal(result.body, "");
+  assert.equal(cancelled, true);
+  assert.equal(textRead, false);
 });

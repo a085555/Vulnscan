@@ -1,30 +1,31 @@
-# Vulnscan v6.1.0
+# Vulnscan v6.2.0
 
-Vulnscan v6.1 improves result stability, scan transparency, and extension-side trust boundaries without broadening active behavior.
+Vulnscan v6.2 adds a clearer assessment map, deeper result guidance, and bounded web-boundary checks while keeping active behavior exact-origin, credential-free, and budgeted.
 
-## Accuracy
+## Scan map
 
-- Stable finding identities are separate from mutable report fingerprints.
-- Comparisons now classify evidence and detail changes at the same affected location as changed.
-- Enforced CSP headers are evaluated together; report-only policies are shown separately.
-- Header review recognizes disabled HSTS, invalid X-Frame-Options, weak or invalid referrer policies, CSP framing protection, and modern cookie constraints.
-- Cross-origin stylesheet SRI is reviewed alongside script SRI.
+- Surface view links findings and review items to observed routes, parameter names, forms, resources, external origins, storage names, and authentication clues.
+- Scan flow view shows the stages and checks that produced each result.
+- Search, surface, result-bucket, and severity filters keep large maps readable.
+- Current and historical v6.2 reports can be opened in the map; older compatible history falls back to Scan flow.
+- Map collection and rendering have fixed node and relationship limits.
 
-## Evidence and reliability
+## Guided investigation
 
-- Results can include a sanitized affected location and safe DOM selector.
-- The investigation drawer can highlight an affected element in the selected target tab.
-- Source traversal, DOM inspection, findings, secret exports, captured headers, and incoming message fields have explicit limits.
-- Scan health notices make partial coverage visible whenever a limit is reached.
+- Investigation details explain what was observed, which conditions are needed for exploitation, a likely attack path, possible impact, and evidence that would weaken the finding.
+- Safe lab walkthroughs use non-executable markers, placeholders, and reserved example domains.
+- Redacted Markdown and JSON reports include concise exploitability guidance and active-check coverage.
 
-## Extension hardening
+## Web boundaries
 
-- Passive results and secret-vault updates must match the current scan ID, tab, origin, and exact page URL.
-- Captured cookie values are removed before header analysis.
-- Chrome and Firefox manifests declare the extension-page content security policy explicitly.
+- Header review now covers CORS, Cross-Origin-Opener-Policy, Cross-Origin-Embedder-Policy, and Cross-Origin-Resource-Policy.
+- Missing optional cross-origin policies are shown neutrally; contradictory wildcard-with-credentials CORS is not reported as a browser bypass.
+- Safe Active can send one credential-free CORS probe and reports only exact extension-origin acceptance observed by the browser.
+- Safe Active can confirm declared same-origin source maps for up to three scripts with strict request and response limits.
+- Passive JWT review decodes bounded header and expiry metadata without showing claims or raw token values.
 
-## Safety and privacy
+## Safety and compatibility
 
-- Raw secret values remain available only through the separately confirmed full-secret export.
-- Visible results, history, copied text, redacted reports, and request logs remain free of raw secret values.
-- Active modes remain exact-origin, credential-free, budgeted, and limited to GET, HEAD, and OPTIONS requests.
+- Raw response bodies, source-map contents, query values, storage values, and JWT claims are not stored in findings or history.
+- New coverage records distinguish complete, limited, unavailable, and stopped checks.
+- Chrome and Firefox builds use the same shared scanner source and require no new broad permissions or package dependencies.

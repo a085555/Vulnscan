@@ -11,10 +11,12 @@ const sharedFiles = [
   "dashboard.js",
   "finding-guidance.js",
   "finding-model.js",
+  "url-utils.js",
   "LICENSE",
   "README.md",
   "RELEASE_NOTES.md",
   "request-controller.js",
+  "scan-map.js",
   "scan-checks.js"
 ];
 

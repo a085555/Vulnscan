@@ -9,7 +9,12 @@
     secretValues: 100,
     secretValueCharacters: 4096,
     secretVaultCharacters: 256 * 1024,
-    messageTextCharacters: 4000
+    messageTextCharacters: 4000,
+    surfaceNodes: 200,
+    surfaceEdges: 320,
+    surfaceRefsPerFinding: 8,
+    mapNodes: 200,
+    mapEdges: 320
   });
 
   function clean(value) {
@@ -64,6 +69,11 @@
       location: clean(item.location),
       selector: clean(item.selector),
       source: clean(item.source) || "passive",
+      surfaceRefs: Array.from(new Set((Array.isArray(item.surfaceRefs) ? item.surfaceRefs : []).map(function (value) {
+        return clean(value).slice(0, 80);
+      }).filter(function (value) {
+        return /^vs-[0-9a-f]{8}$/.test(value);
+      }))).slice(0, limits.surfaceRefsPerFinding),
       occurrences: Math.max(1, Number.parseInt(item.occurrences, 10) || 1)
     };
     normalized.fingerprint = normalized.fingerprint || fingerprint(normalized);
@@ -78,6 +88,7 @@
       const existing = unique.get(item.identityFingerprint);
       if (existing) {
         existing.occurrences += item.occurrences;
+        existing.surfaceRefs = Array.from(new Set(existing.surfaceRefs.concat(item.surfaceRefs))).slice(0, limits.surfaceRefsPerFinding);
         return;
       }
       unique.set(item.identityFingerprint, item);
@@ -134,6 +145,7 @@
         finding.verification !== old.verification ||
         finding.location !== old.location ||
         finding.selector !== old.selector ||
+        finding.surfaceRefs.join("|") !== old.surfaceRefs.join("|") ||
         finding.occurrences !== old.occurrences;
       if (changed) result.changed.push({ current: finding, previous: old });
       else result.unchanged.push(finding);
@@ -145,6 +157,77 @@
     return result;
   }
 
+  function surfaceId(kind, value) {
+    return "vs-" + hash(clean(kind).toLowerCase() + "|" + clean(value).toLowerCase());
+  }
+
+  function normalizeSurface(surface) {
+    const source = surface && typeof surface === "object" ? surface : {};
+    const allowedKinds = new Set(["target", "route", "parameter", "form", "resource", "external-origin", "storage", "authentication"]);
+    const allowedRelations = new Set(["contains", "observed", "loads", "submits", "uses", "connects"]);
+    const nodes = [];
+    const seen = new Set();
+    (Array.isArray(source.nodes) ? source.nodes : []).some(function (node) {
+      if (nodes.length >= limits.surfaceNodes) return true;
+      const item = node && typeof node === "object" ? node : {};
+      const kind = allowedKinds.has(item.kind) ? item.kind : "";
+      const id = clean(item.id).slice(0, 80);
+      if (!kind || !/^vs-[0-9a-f]{8}$/.test(id) || seen.has(id)) return false;
+      seen.add(id);
+      nodes.push({
+        id: id,
+        kind: kind,
+        label: clean(item.label).slice(0, 120) || "Observed surface",
+        detail: clean(item.detail).slice(0, 500),
+        location: clean(item.location).slice(0, 1000),
+        selector: clean(item.selector).slice(0, 240),
+        external: item.external === true,
+        occurrences: Math.min(10000, Math.max(1, Number.parseInt(item.occurrences, 10) || 1))
+      });
+      return false;
+    });
+    const edges = [];
+    const edgeKeys = new Set();
+    (Array.isArray(source.edges) ? source.edges : []).some(function (edge) {
+      if (edges.length >= limits.surfaceEdges) return true;
+      const item = edge && typeof edge === "object" ? edge : {};
+      const from = clean(item.from).slice(0, 80);
+      const to = clean(item.to).slice(0, 80);
+      const relation = allowedRelations.has(item.relation) ? item.relation : "observed";
+      const key = from + "|" + to + "|" + relation;
+      if (!seen.has(from) || !seen.has(to) || from === to || edgeKeys.has(key)) return false;
+      edgeKeys.add(key);
+      edges.push({ from: from, to: to, relation: relation });
+      return false;
+    });
+    return {
+      nodes: nodes,
+      edges: edges,
+      truncated: source.truncated === true || (Array.isArray(source.nodes) && source.nodes.length > nodes.length) ||
+        (Array.isArray(source.edges) && source.edges.length > edges.length)
+    };
+  }
+
+  function normalizeCoverage(coverage) {
+    const allowedStatuses = new Set(["complete", "limited", "unavailable", "stopped"]);
+    const allowedNotes = new Set(["", "origin-not-observed", "candidate-limit", "request-budget", "response-limit", "request-stopped"]);
+    const seen = new Set();
+    return (Array.isArray(coverage) ? coverage : []).reduce(function (result, entry) {
+      const item = entry && typeof entry === "object" ? entry : {};
+      const checkId = clean(item.checkId).slice(0, 120);
+      if (!checkId || seen.has(checkId) || !allowedStatuses.has(item.status)) return result;
+      seen.add(checkId);
+      result.push({
+        checkId: checkId,
+        status: item.status,
+        inspected: Math.min(10000, Math.max(0, Number.parseInt(item.inspected, 10) || 0)),
+        matched: Math.min(10000, Math.max(0, Number.parseInt(item.matched, 10) || 0)),
+        note: allowedNotes.has(item.note) ? item.note : ""
+      });
+      return result;
+    }, []).slice(0, 20);
+  }
+
   root.VulnscanFindings = {
     normalize: normalize,
     dedupe: dedupe,
@@ -153,6 +236,9 @@
     compare: compare,
     fingerprint: fingerprint,
     identityFingerprint: identityFingerprint,
+    surfaceId: surfaceId,
+    normalizeSurface: normalizeSurface,
+    normalizeCoverage: normalizeCoverage,
     limits: limits,
     key: function (value) { return "vk-" + hash(clean(value)); }
   };

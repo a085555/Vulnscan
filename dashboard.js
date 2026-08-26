@@ -62,6 +62,22 @@ const findingDrawerBody = document.getElementById("findingDrawerBody");
 const findingTriageState = document.getElementById("findingTriageState");
 const copyFindingBriefBtn = document.getElementById("copyFindingBrief");
 const showAffectedBtn = document.getElementById("showAffectedBtn");
+const scanMapDialog = document.getElementById("scanMapDialog");
+const scanMapBackdrop = document.getElementById("scanMapBackdrop");
+const scanMapClose = document.getElementById("scanMapClose");
+const scanMapSubtitle = document.getElementById("scanMapSubtitle");
+const scanMapSearch = document.getElementById("scanMapSearch");
+const scanMapKind = document.getElementById("scanMapKind");
+const scanMapBucket = document.getElementById("scanMapBucket");
+const scanMapSeverity = document.getElementById("scanMapSeverity");
+const scanMapSvg = document.getElementById("scanMapSvg");
+const scanMapViewport = document.getElementById("scanMapViewport");
+const scanMapDetails = document.getElementById("scanMapDetails");
+const scanMapStatus = document.getElementById("scanMapStatus");
+const scanMapZoomOut = document.getElementById("scanMapZoomOut");
+const scanMapZoomIn = document.getElementById("scanMapZoomIn");
+const scanMapFit = document.getElementById("scanMapFit");
+const scanMapReset = document.getElementById("scanMapReset");
 
 let selectedTabId = null;
 let currentFindings = [];
@@ -84,6 +100,14 @@ let currentRequestController = null;
 let authorizationResolve = null;
 let scanCancelled = false;
 let drawerReturnFocus = null;
+let mapScanData = null;
+let mapView = "surface";
+let mapScale = 1;
+let mapPanX = 0;
+let mapPanY = 0;
+let mapDragging = false;
+let mapPointer = null;
+let mapReturnFocus = null;
 
 if (brandVersion) {
   brandVersion.textContent = "v" + chrome.runtime.getManifest().version;
@@ -129,41 +153,16 @@ function showTarget(url, favIconUrl) {
 }
 
 function comparableUrl(value) {
-  try {
-    const url = new URL(value);
-    url.hash = "";
-    return url.href;
-  } catch (e) {
-    return "";
-  }
+  return VulnscanUrls.comparable(value);
 }
 
 function targetUrl(value) {
-  try {
-    const url = new URL(value);
-    const names = Array.from(new Set(Array.from(url.searchParams.keys()))).sort().slice(0, 100);
-    return url.origin + url.pathname + (names.length ? "?" + names.map(encodeURIComponent).join("&") : "");
-  } catch (e) {
-    return "";
-  }
+  return VulnscanUrls.target(value);
 }
 
 function redactUrl(value) {
-  try {
-    const url = new URL(value);
-    url.username = "";
-    url.password = "";
-    url.hash = "";
-    url.pathname = url.pathname.split("/").map(function (part) {
-      return part.length >= 20 && /^[A-Za-z0-9._~-]+$/.test(part) ? "[redacted]" : part;
-    }).join("/");
-    Array.from(url.searchParams.keys()).forEach(function (name) {
-      url.searchParams.set(name, "[redacted]");
-    });
-    return url.href;
-  } catch (e) {
-    return "";
-  }
+  const redacted = VulnscanUrls.redact(value);
+  return redacted === "[invalid URL]" ? "" : redacted;
 }
 
 function urlFingerprint(value) {
@@ -269,6 +268,7 @@ function findingByFingerprint(fingerprint) {
 function investigationBrief(finding) {
   const guidance = VulnscanGuidance.get(finding);
   const priority = VulnscanGuidance.priority(finding);
+  const education = guidance.exploitability;
   let text = finding.type + "\n";
   text += "Target: " + (lastScanData ? lastScanData.url : "") + "\n";
   text += "Severity: " + finding.severity + " | Confidence: " + finding.confidence + " | Priority: " + priority.label + " (" + priority.score + ")\n";
@@ -277,6 +277,10 @@ function investigationBrief(finding) {
   text += "Observation\n" + finding.detail + "\n\n";
   text += "Evidence\n" + (finding.evidence || "No additional evidence recorded.") + "\n\n";
   text += "Why it matters\n" + guidance.impact + "\n\n";
+  text += "Exploitability\n" + guidance.exploitability.plainLanguage + "\n";
+  text += "What was observed: " + guidance.exploitability.observed + "\n";
+  text += "Required conditions: " + guidance.exploitability.prerequisites.join("; ") + "\n";
+  text += "Evidence that would weaken it: " + guidance.exploitability.weakens.join("; ") + "\n\n";
   text += "Recommended action\n" + guidance.remediation + "\n\n";
   text += "Verification\n" + (finding.verification || guidance.steps[0]) + "\n\n";
   if (finding.location) text += "Affected location: " + finding.location + "\n";
@@ -297,11 +301,22 @@ function openFindingDrawer(fingerprint) {
   if (!finding || !findingDrawer || !findingDrawerBody) return;
   const guidance = VulnscanGuidance.get(finding);
   const priority = VulnscanGuidance.priority(finding);
+  const education = guidance.exploitability;
   const change = currentComparisonStatuses.get(finding.fingerprint);
   const workflow = triageStateFor(finding);
   const steps = [finding.verification].concat(guidance.steps).filter(Boolean).filter(function (step, index, list) {
     return list.indexOf(step) === index;
   });
+  const list = function (items) {
+    return "<ol>" + items.map(function (item) { return "<li>" + escapeHtml(item) + "</li>"; }).join("") + "</ol>";
+  };
+  const lab = education.lab ? '<details class="learning-details"><summary>Safe lab walkthrough</summary><div class="learning-content"><h4>' +
+    escapeHtml(education.lab.title) + '</h4><pre><code>' + escapeHtml(education.lab.template) + '</code></pre><button class="btn-mini copy-lab-template" type="button">Copy template</button>' +
+    '<div class="learning-outcomes"><p><strong>Secure result</strong>' + escapeHtml(education.lab.safeResult) + '</p><p><strong>Needs review</strong>' + escapeHtml(education.lab.riskyResult) +
+    '</p></div><p class="learning-safety">' + escapeHtml(education.lab.safety) + "</p></div></details>" : "";
+  const terms = education.terms.length ? '<details class="learning-details"><summary>Terms used</summary><div class="learning-content glossary-list">' + education.terms.map(function (term) {
+    return "<p><strong>" + escapeHtml(term.term) + "</strong>" + escapeHtml(term.definition) + "</p>";
+  }).join("") + "</div></details>" : "";
   activeFindingFingerprint = finding.fingerprint;
   drawerReturnFocus = document.activeElement || null;
   findingDrawerTitle.textContent = finding.type;
@@ -316,6 +331,10 @@ function openFindingDrawer(fingerprint) {
     '<section class="drawer-section"><h3>Observation</h3><p>' + escapeHtml(finding.detail || "No additional detail recorded.") + "</p></section>" +
     '<section class="drawer-section"><h3>Evidence</h3><p>' + escapeHtml(finding.evidence || "No additional evidence recorded.") + "</p></section>" +
     '<section class="drawer-section"><h3>Why it matters</h3><p>' + escapeHtml(guidance.impact) + "</p></section>" +
+    '<section class="drawer-section exploitability-section"><div class="exploitability-head"><h3>Exploitability</h3><span class="exploitability-badge ' + escapeHtml(education.level) + '">' + escapeHtml(education.level) + '</span></div><p class="exploitability-lead">' + escapeHtml(education.plainLanguage) + '</p>' +
+    '<div class="observed-box"><strong>What Vulnscan observed</strong><span>' + escapeHtml(education.observed) + '</span></div>' +
+    '<details class="learning-details"><summary>How exploitation could happen</summary><div class="learning-content"><h4>Required conditions</h4>' + list(education.prerequisites) + '<h4>Likely path</h4>' + list(education.attackPath) + '<h4>Possible impact</h4>' + list(education.possibleImpact) + '</div></details>' +
+    '<details class="learning-details"><summary>What would weaken or disprove it</summary><div class="learning-content">' + list(education.weakens) + '</div></details>' + lab + terms + '</section>' +
     '<section class="drawer-section"><h3>Recommended action</h3><p>' + escapeHtml(guidance.remediation) + "</p></section>" +
     '<section class="drawer-section"><h3>Investigation steps</h3><ol>' + steps.map(function (step) {
       return "<li>" + escapeHtml(step) + "</li>";
@@ -329,6 +348,15 @@ function openFindingDrawer(fingerprint) {
     "<dt>Category</dt><dd>" + escapeHtml(finding.category) + "</dd>" +
     "<dt>Stage</dt><dd>" + escapeHtml(sourceLabel(finding.source)) + "</dd>" +
     "<dt>Occurrences</dt><dd>" + finding.occurrences + "</dd></dl></section>";
+  const copyLab = findingDrawerBody.querySelector(".copy-lab-template");
+  if (copyLab && education.lab) {
+    copyLab.addEventListener("click", function () {
+      navigator.clipboard.writeText(education.lab.template).then(function () {
+        copyLab.textContent = "Copied";
+        setTimeout(function () { copyLab.textContent = "Copy template"; }, 1200);
+      });
+    });
+  }
   if (showAffectedBtn) showAffectedBtn.hidden = !finding.selector;
   findingDrawer.hidden = false;
   if (findingDrawerClose && typeof findingDrawerClose.focus === "function") findingDrawerClose.focus();
@@ -362,6 +390,98 @@ async function showAffectedOnPage(finding) {
   });
   const located = response && response[0] && response[0].result === true;
   setStatus(located ? "// affected element highlighted in the target tab" : "// affected element is no longer present on the page");
+}
+
+function closeScanMap() {
+  if (!scanMapDialog) return;
+  scanMapDialog.hidden = true;
+  mapScanData = null;
+  mapDragging = false;
+  mapPointer = null;
+  if (mapReturnFocus && typeof mapReturnFocus.focus === "function") mapReturnFocus.focus();
+  mapReturnFocus = null;
+}
+
+function applyMapTransform() {
+  if (!scanMapSvg) return;
+  const layer = scanMapSvg.querySelector(".scan-map-layer");
+  if (layer) layer.setAttribute("transform", "translate(" + mapPanX + " " + mapPanY + ") scale(" + mapScale + ")");
+}
+
+function resetMapTransform() {
+  mapScale = 1;
+  mapPanX = 0;
+  mapPanY = 0;
+  applyMapTransform();
+}
+
+function mapCoverage(node) {
+  if (!mapScanData || node.kind !== "check") return null;
+  return (mapScanData.coverage || []).find(function (entry) { return entry.checkId === node.checkId; }) || null;
+}
+
+function renderMapDetails(node) {
+  if (!scanMapDetails || !node) return;
+  if (node.kind === "finding") {
+    const finding = node.data;
+    const guidance = VulnscanGuidance.get(finding);
+    const current = lastScanData && mapScanData && lastScanData.scanId === mapScanData.scanId;
+    scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(finding.bucket) + " · " + escapeHtml(finding.severity) + '</div><h3>' + escapeHtml(finding.type) + '</h3>' +
+      '<p>' + escapeHtml(finding.detail) + '</p><dl><dt>Evidence</dt><dd>' + escapeHtml(finding.evidence || "No additional evidence recorded.") + '</dd><dt>Exploitability</dt><dd>' + escapeHtml(guidance.exploitability.plainLanguage) + '</dd><dt>Affected location</dt><dd>' + escapeHtml(finding.location || "Not recorded") + '</dd><dt>Stage</dt><dd>' + escapeHtml(sourceLabel(finding.source)) + '</dd></dl>' +
+      (current ? '<button class="btn primary map-investigate" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Open investigation</button>' : '<p class="map-readonly">Historical map — investigation details are read-only.</p>');
+    const investigate = scanMapDetails.querySelector(".map-investigate");
+    if (investigate) investigate.addEventListener("click", function () {
+      const fingerprint = investigate.getAttribute("data-fingerprint");
+      closeScanMap();
+      openFindingDrawer(fingerprint);
+    });
+    return;
+  }
+  const coverage = mapCoverage(node);
+  const detail = node.detail || node.kind;
+  scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + escapeHtml(categoryLabel(node.kind)) + '</div><h3>' + escapeHtml(node.label) + '</h3><p>' + escapeHtml(detail) + '</p><dl>' +
+    (node.location ? '<dt>Location</dt><dd>' + escapeHtml(node.location) + '</dd>' : "") +
+    (node.occurrences ? '<dt>Occurrences</dt><dd>' + Number(node.occurrences) + '</dd>' : "") +
+    (node.status ? '<dt>Status</dt><dd>' + escapeHtml(node.status) + '</dd>' : "") +
+    (coverage ? '<dt>Coverage</dt><dd>' + escapeHtml(coverage.status) + ' · ' + coverage.inspected + ' inspected · ' + coverage.matched + ' matched</dd>' : "") +
+    '</dl>';
+}
+
+function renderScanMap() {
+  if (!mapScanData || !scanMapSvg) return;
+  const graph = VulnscanMap.build(mapScanData, mapView, {
+    query: scanMapSearch ? scanMapSearch.value : "",
+    kind: scanMapKind ? scanMapKind.value : "all",
+    bucket: scanMapBucket ? scanMapBucket.value : "all",
+    severity: scanMapSeverity ? scanMapSeverity.value : "all"
+  });
+  VulnscanMap.render(scanMapSvg, graph, renderMapDetails);
+  resetMapTransform();
+  if (scanMapDetails) scanMapDetails.innerHTML = '<div class="empty-hint">Select a map node to inspect it.</div>';
+  if (scanMapStatus) {
+    const notice = mapView === "surface" && !graph.available ? " · no structured surface data" : graph.truncated ? " · collection limit reached" : graph.overflow ? " · " + graph.overflow + " nodes summarized" : "";
+    scanMapStatus.textContent = graph.nodes.length + " nodes · " + graph.edges.length + " relationships" + notice;
+  }
+  if (scanMapKind) scanMapKind.disabled = mapView !== "surface";
+}
+
+function openScanMap(scan, returnFocus) {
+  const normalized = normalizeScan(scan);
+  if (!normalized || !scanMapDialog) return;
+  mapScanData = normalized;
+  mapReturnFocus = returnFocus || document.activeElement || null;
+  mapView = normalized.surface.nodes.some(function (node) { return node.kind !== "target"; }) ? "surface" : "flow";
+  document.querySelectorAll(".scan-map-view").forEach(function (button) {
+    button.classList.toggle("active", button.getAttribute("data-map-view") === mapView);
+  });
+  if (scanMapSubtitle) scanMapSubtitle.textContent = normalized.url + " · " + sourceLabel(normalized.scanMode) + " · " + new Date(normalized.timestamp).toLocaleString();
+  if (scanMapSearch) scanMapSearch.value = "";
+  if (scanMapKind) scanMapKind.value = "all";
+  if (scanMapBucket) scanMapBucket.value = "all";
+  if (scanMapSeverity) scanMapSeverity.value = "all";
+  scanMapDialog.hidden = false;
+  renderScanMap();
+  if (scanMapClose) scanMapClose.focus();
 }
 
 function requestMode() {
@@ -506,18 +626,18 @@ function finishAuthorization(approved) {
 }
 
 function normalizeScan(scan) {
-  if (!scan || ![2, 3, 4, 5, 6, 7].includes(scan.schemaVersion) || !scan.url) return null;
+  if (!scan || ![2, 3, 4, 5, 6, 7, 8].includes(scan.schemaVersion) || !scan.url) return null;
   const findings = VulnscanFindings.dedupe(scan.findings || []);
   const mode = ["passive", "safe", "lab", "full"].includes(scan.scanMode) ? scan.scanMode : "legacy";
   const checks = VulnscanChecks.effective(scan.checksRun, mode);
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     scanId: scan.scanId || null,
     scanMode: mode,
     url: scan.url,
     urlFingerprint: urlFingerprint(scan.url),
     legacyUrlFingerprint: scan.legacyUrlFingerprint || scan.urlFingerprint || null,
-    vaultFingerprint: scan.schemaVersion === 7 ? scan.vaultFingerprint || null : null,
+    vaultFingerprint: scan.schemaVersion >= 7 ? scan.vaultFingerprint || null : null,
     timestamp: scan.timestamp || Date.now(),
     findings: findings,
     summary: VulnscanFindings.summarize(findings),
@@ -529,12 +649,16 @@ function normalizeScan(scan) {
       sourceTruncated: !!(scan.scanLimits && scan.scanLimits.sourceTruncated),
       domTruncated: !!(scan.scanLimits && scan.scanLimits.domTruncated),
       findingsTruncated: !!(scan.scanLimits && scan.scanLimits.findingsTruncated),
-      secretsTruncated: !!(scan.scanLimits && scan.scanLimits.secretsTruncated)
-    }
+      secretsTruncated: !!(scan.scanLimits && scan.scanLimits.secretsTruncated),
+      surfaceTruncated: !!(scan.scanLimits && scan.scanLimits.surfaceTruncated)
+    },
+    surface: VulnscanFindings.normalizeSurface(scan.surface),
+    coverage: VulnscanFindings.normalizeCoverage(scan.coverage)
   };
 }
 
 function clearResults() {
+  closeScanMap();
   lastScanData = null;
   currentFindings = [];
   chrome.runtime.sendMessage({ type: "clear_export_secrets" }, function () {});
@@ -569,13 +693,13 @@ function clearResults() {
   setStatus("// results cleared — open a site tab and hit Scan");
 }
 
-function headerFinding(checkId, severity, type, detail, confidence, evidence, verification, location) {
+function headerFinding(checkId, severity, type, detail, confidence, evidence, verification, location, category) {
   return VulnscanFindings.normalize({
     checkId: checkId,
     severity: severity,
     confidence: confidence,
     bucket: "review",
-    category: "headers",
+    category: category || "headers",
     type: type,
     detail: detail,
     evidence: evidence,
@@ -646,6 +770,7 @@ function analyzeHeaders(headerList, pageUrl, enabledChecks) {
   const selected = VulnscanChecks.normalize(enabledChecks);
   const securityEnabled = VulnscanChecks.enabled(selected, "headers.security");
   const cookiesEnabled = VulnscanChecks.enabled(selected, "headers.cookies");
+  const boundariesEnabled = VulnscanChecks.enabled(selected, "headers.boundaries");
 
   if (securityEnabled) {
     const cspValues = values["content-security-policy"] || [];
@@ -774,6 +899,76 @@ function analyzeHeaders(headerList, pageUrl, enabledChecks) {
     }
   }
 
+  if (boundariesEnabled) {
+    const allowOrigins = values["access-control-allow-origin"] || [];
+    const allowCredentials = first("access-control-allow-credentials").trim().toLowerCase();
+    const originValue = allowOrigins.length === 1 ? allowOrigins[0].trim() : "";
+    if (!allowOrigins.length) {
+      rows.push(["CORS policy", "neutral", "Not advertised"]);
+    } else if (allowOrigins.length > 1 || originValue.includes(",")) {
+      rows.push(["CORS policy", "weak", "Multiple origins"]);
+      review.push(headerFinding(
+        "header.cors.multiple-origins", "low", "CORS origin policy is invalid", "The response contains multiple Access-Control-Allow-Origin values.", "high",
+        "Browsers require a single wildcard or serialized origin value.",
+        "Confirm which layer adds each header and return one policy value for the requesting origin.",
+        "Access-Control-Allow-Origin", "cross-origin"
+      ));
+    } else if (originValue === "null") {
+      rows.push(["CORS policy", "weak", "Allows null origin"]);
+      review.push(headerFinding(
+        "header.cors.null-origin", allowCredentials === "true" ? "medium" : "low", "CORS allows the null origin", "Access-Control-Allow-Origin is set to null" + (allowCredentials === "true" ? " with credentials enabled." : "."), "high",
+        "Sandboxed and non-hierarchical documents can have a serialized null origin.",
+        "Use an explicit allowlist of trusted HTTPS origins and verify the policy on sensitive response paths.",
+        "Access-Control-Allow-Origin", "cross-origin"
+      ));
+    } else if (originValue === "*") {
+      rows.push(["CORS policy", allowCredentials === "true" ? "weak" : "ok", allowCredentials === "true" ? "Wildcard + credentials" : "Public without credentials"]);
+      if (allowCredentials === "true") {
+        review.push(headerFinding(
+          "header.cors.wildcard-credentials", "low", "CORS credentials policy is contradictory", "The response combines a wildcard origin with Access-Control-Allow-Credentials: true.", "high",
+          "Browsers reject credentialed reads with a wildcard origin, so this is not a confirmed data-exposure path.",
+          "Use a specific trusted origin for credentialed access or remove the credentials header for intentionally public responses.",
+          "Access-Control-Allow-Origin", "cross-origin"
+        ));
+      }
+    } else {
+      let validOrigin = false;
+      try { validOrigin = new URL(originValue).origin === originValue; } catch (e) {}
+      rows.push(["CORS policy", validOrigin ? "ok" : "weak", validOrigin ? "Restricted origin" : "Invalid origin"]);
+      if (!validOrigin) {
+        review.push(headerFinding(
+          "header.cors.invalid-origin", "low", "CORS origin value is invalid", "Access-Control-Allow-Origin is neither a wildcard nor a valid serialized origin.", "high",
+          "The browser is expected to ignore this policy value.",
+          "Return exactly one valid trusted origin or omit the header.",
+          "Access-Control-Allow-Origin", "cross-origin"
+        ));
+      }
+    }
+
+    const policyRows = [
+      ["Cross-Origin-Opener-Policy", "cross-origin-opener-policy", new Set(["unsafe-none", "same-origin-allow-popups", "same-origin", "noopener-allow-popups"]), "header.coop.invalid"],
+      ["Cross-Origin-Embedder-Policy", "cross-origin-embedder-policy", new Set(["unsafe-none", "require-corp", "credentialless"]), "header.coep.invalid"],
+      ["Cross-Origin-Resource-Policy", "cross-origin-resource-policy", new Set(["same-origin", "same-site", "cross-origin"]), "header.corp.invalid"]
+    ];
+    policyRows.forEach(function (policy) {
+      const value = first(policy[1]).split(";")[0].trim().toLowerCase();
+      if (!value) {
+        rows.push([policy[0], "neutral", "Not set"]);
+        return;
+      }
+      const valid = policy[2].has(value);
+      rows.push([policy[0], valid ? "ok" : "weak", valid ? value : "Invalid value"]);
+      if (!valid) {
+        review.push(headerFinding(
+          policy[3], "info", policy[0] + " needs review", "The captured policy value is not recognized and may be ignored by the browser.", "high",
+          "An unrecognized policy token was captured; its raw value was not retained in the finding.",
+          "Choose a supported value that matches the application's isolation and embedding requirements.",
+          policy[0], "cross-origin"
+        ));
+      }
+    });
+  }
+
   let html = rows.map(function (row) {
     return '<div class="header-item"><span class="name">' + escapeHtml(row[0]) +
       '</span><span class="status ' + row[1] + '">' + escapeHtml(row[2]) + '</span></div>';
@@ -829,11 +1024,49 @@ function activeFinding(options) {
   return VulnscanFindings.normalize(Object.assign({ source: "active" }, options));
 }
 
+function targetSurfaceIdFor(value) {
+  return VulnscanFindings.surfaceId("target", VulnscanUrls.target(value));
+}
+
+function responseHeader(response, name) {
+  return response && response.headers && typeof response.headers.get === "function" ? String(response.headers.get(name) || "") : "";
+}
+
+function sourceMapDeclaration(response, scriptUrl) {
+  const header = responseHeader(response, "SourceMap") || responseHeader(response, "X-SourceMap");
+  if (header) return header.trim();
+  const body = String(response && response.body || "");
+  const expressions = [
+    /\/\/[#@]\s*sourceMappingURL\s*=\s*([^\s'"<>]+)/g,
+    /\/\*[#@]\s*sourceMappingURL\s*=\s*([^*]+?)\s*\*\//g
+  ];
+  let value = "";
+  expressions.forEach(function (expression) {
+    let match;
+    while ((match = expression.exec(body))) value = match[1].trim();
+  });
+  if (!value || value.length > 2000 || value.startsWith("data:")) return "";
+  try {
+    const resolved = new URL(value, scriptUrl);
+    return resolved.origin === new URL(scriptUrl).origin ? resolved.href : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function getCorsProbe(scanId) {
+  return new Promise(function (resolve) {
+    chrome.runtime.sendMessage({ type: "get_cors_probe", scanId: scanId }, function (response) {
+      resolve(response || { observed: false, originSent: false, originMatchesExtension: false, originWasNull: false });
+    });
+  });
+}
+
 function applyFindingLimits(findings, scanLimits) {
-  const state = Object.assign({ sourceTruncated: false, domTruncated: false, findingsTruncated: false, secretsTruncated: false }, scanLimits || {});
+  const state = Object.assign({ sourceTruncated: false, domTruncated: false, findingsTruncated: false, secretsTruncated: false, surfaceTruncated: false }, scanLimits || {});
   let list = VulnscanFindings.dedupe(findings);
   if (list.length > VulnscanFindings.limits.findings) state.findingsTruncated = true;
-  if (!state.sourceTruncated && !state.domTruncated && !state.findingsTruncated && !state.secretsTruncated) {
+  if (!state.sourceTruncated && !state.domTruncated && !state.findingsTruncated && !state.secretsTruncated && !state.surfaceTruncated) {
     return { findings: list, scanLimits: state };
   }
   const notes = [];
@@ -841,6 +1074,7 @@ function applyFindingLimits(findings, scanLimits) {
   if (state.domTruncated) notes.push("DOM element processing limit reached");
   if (state.findingsTruncated) notes.push("finding limit reached");
   if (state.secretsTruncated) notes.push("secret export limit reached");
+  if (state.surfaceTruncated) notes.push("surface map collection limit reached");
   list = list.filter(function (finding) { return finding.checkId !== "scan.limits"; }).slice(0, VulnscanFindings.limits.findings - 1);
   list.push(VulnscanFindings.normalize({
     checkId: "scan.limits",
@@ -860,6 +1094,7 @@ function applyFindingLimits(findings, scanLimits) {
 
 async function runActiveChecks(pageUrl, scanId, requestController, options) {
   const extra = [];
+  const coverage = [];
   const canary = "vxscan" + Date.now().toString(36);
   let parsed;
   try { parsed = new URL(pageUrl); } catch (e) { return extra; }
@@ -878,6 +1113,12 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
   const includeSafe = safeSelected && (settings.includeSafe === true || (settings.includeSafe === undefined && (mode === "safe" || mode === "full")));
   const includeLab = labSelected && (settings.includeLab === true || (settings.includeLab === undefined && (mode === "lab" || mode === "full")));
   const onStage = typeof settings.onStage === "function" ? settings.onStage : function () {};
+
+  function result() {
+    const findings = VulnscanFindings.dedupe(extra);
+    findings.coverage = VulnscanFindings.normalizeCoverage(coverage);
+    return findings;
+  }
 
   if (includeSafe) {
     onStage("safe", "running");
@@ -900,7 +1141,8 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
             detail: 'Parameter "' + param + '" was reflected in the response.',
             evidence: "A unique harmless marker was returned verbatim in the response body.",
             verification: "Locate the reflection context and confirm whether output encoding prevents HTML or script interpretation.",
-            location: "query parameter: " + param
+            location: "query parameter: " + param,
+            surfaceRefs: [VulnscanFindings.surfaceId("parameter", "query|" + param)]
           }));
           break;
         }
@@ -948,7 +1190,8 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
           detail: 'Parameter "' + match.param + '" redirected to the injected external destination.',
           evidence: redactUrl(match.from) + " → " + redactUrl(match.to),
           verification: "Repeat with another controlled HTTPS destination and confirm that no allowlist or interstitial blocks the redirect.",
-          location: "query parameter: " + match.param
+          location: "query parameter: " + match.param,
+          surfaceRefs: [VulnscanFindings.surfaceId("parameter", "query|" + match.param)]
         }));
       }
     }
@@ -968,17 +1211,112 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
           detail: redactUrl(sitemap[1]),
           evidence: "robots.txt contains a Sitemap directive.",
           verification: "Open the sitemap and review whether it exposes unexpected application routes.",
-          location: "/robots.txt"
+          location: "/robots.txt",
+          surfaceRefs: [targetSurfaceIdFor(pageUrl)]
         }));
       }
+    }
+
+    if (VulnscanChecks.enabled(enabledChecks, "safe.cors") && controller.canRequest()) {
+      const probeUrl = new URL(pageUrl);
+      probeUrl.searchParams.set("__vulnscan_cors", scanId || canary);
+      const response = await controller.request(probeUrl.href, { method: "GET", responseMode: "discard" });
+      const observed = await getCorsProbe(scanId);
+      let status = "complete";
+      let note = "";
+      if (!response || response.skipped || response.outcome !== "complete") {
+        status = "stopped";
+        note = controller.getSummary().stoppedReason === "budget-exhausted" ? "request-budget" : "request-stopped";
+      } else if (!observed.observed || !observed.originSent) {
+        status = "unavailable";
+        note = "origin-not-observed";
+      }
+      const allowedOrigin = responseHeader(response, "Access-Control-Allow-Origin").trim();
+      const credentials = responseHeader(response, "Access-Control-Allow-Credentials").trim().toLowerCase() === "true";
+      const extensionOrigin = VulnscanUrls.origin(chrome.runtime.getURL(""));
+      let accepted = false;
+      if (status === "complete" && observed.originMatchesExtension && allowedOrigin === extensionOrigin) {
+        accepted = true;
+        const vary = responseHeader(response, "Vary").toLowerCase().split(",").map(function (value) { return value.trim(); });
+        extra.push(activeFinding({
+          source: "safe-active",
+          checkId: "active.cors.origin-accepted",
+          severity: credentials ? "medium" : "low",
+          confidence: "high",
+          bucket: "review",
+          category: "cross-origin",
+          type: "CORS probe origin accepted",
+          detail: "The current response allowed the extension-origin probe" + (credentials ? " and advertised credential support." : "."),
+          evidence: "The browser sent its extension origin and the response returned that exact origin. Credentials were omitted." + (vary.includes("origin") ? " Vary: Origin was present." : " Vary: Origin was not observed."),
+          verification: "Repeat from a controlled HTTPS web origin against the intended API response and confirm whether arbitrary origins are accepted.",
+          location: redactUrl(pageUrl),
+          surfaceRefs: [targetSurfaceIdFor(pageUrl)]
+        }));
+      }
+      coverage.push({ checkId: "safe.cors", status: status, inspected: response && !response.skipped ? 1 : 0, matched: accepted ? 1 : 0, note: note });
+    } else if (VulnscanChecks.enabled(enabledChecks, "safe.cors")) {
+      coverage.push({ checkId: "safe.cors", status: "stopped", inspected: 0, matched: 0, note: controller.getSummary().stoppedReason === "budget-exhausted" ? "request-budget" : "request-stopped" });
+    }
+
+    if (VulnscanChecks.enabled(enabledChecks, "safe.source-maps")) {
+      const sourceSettings = settings.sourceMapCandidates || { urls: [], total: 0, truncated: false };
+      const scripts = (sourceSettings.urls || []).slice(0, 3);
+      let inspected = 0;
+      let confirmed = 0;
+      let responseLimited = false;
+      for (let i = 0; i < scripts.length && controller.canRequest(); i++) {
+        let scriptUrl;
+        try { scriptUrl = new URL(scripts[i]); } catch (e) { continue; }
+        if (scriptUrl.origin !== origin) continue;
+        const scriptResponse = await controller.request(scriptUrl.href, { method: "GET" });
+        inspected++;
+        if (scriptResponse && scriptResponse.outcome === "response-too-large") responseLimited = true;
+        const declaration = sourceMapDeclaration(scriptResponse, scriptUrl.href);
+        if (!declaration || !controller.canRequest()) continue;
+        let mapUrl;
+        try { mapUrl = new URL(declaration, scriptUrl.href); } catch (e) { continue; }
+        if (mapUrl.origin !== origin) continue;
+        const mapResponse = await controller.request(mapUrl.href, { method: "GET" });
+        if (!mapResponse || !mapResponse.ok || !mapResponse.body) continue;
+        let map;
+        try { map = JSON.parse(mapResponse.body); } catch (e) { continue; }
+        if (!map || Number(map.version) !== 3 || !Array.isArray(map.sources)) continue;
+        confirmed++;
+        const embedded = Array.isArray(map.sourcesContent) && map.sourcesContent.some(function (value) {
+          return typeof value === "string" && value.length > 0;
+        });
+        extra.push(activeFinding({
+          source: "safe-active",
+          checkId: "active.source-map",
+          severity: "info",
+          confidence: "high",
+          bucket: "review",
+          category: "disclosure",
+          type: "Declared source map reachable",
+          detail: "A same-origin script declared a valid source map with " + Math.min(10000, map.sources.length) + " source reference(s).",
+          evidence: "Map: " + redactUrl(mapUrl.href) + ". Embedded source content: " + (embedded ? "present" : "not observed") + ".",
+          verification: "Review the map in an authorized environment and decide whether original source or internal paths should be publicly available.",
+          location: redactUrl(mapUrl.href),
+          surfaceRefs: [VulnscanFindings.surfaceId("resource", "script|" + redactUrl(scriptUrl.href))]
+        }));
+      }
+      const stoppedReason = controller.getSummary().stoppedReason;
+      const limited = sourceSettings.truncated || responseLimited;
+      coverage.push({
+        checkId: "safe.source-maps",
+        status: stoppedReason ? "stopped" : limited ? "limited" : "complete",
+        inspected: inspected,
+        matched: confirmed,
+        note: stoppedReason === "budget-exhausted" ? "request-budget" : stoppedReason ? "request-stopped" : responseLimited ? "response-limit" : sourceSettings.truncated ? "candidate-limit" : ""
+      });
     }
     onStage("safe", controller.getSummary().stoppedReason ? "stopped" : "complete");
   }
 
-  if (!includeLab || !VulnscanChecks.enabled(enabledChecks, "lab.paths")) return VulnscanFindings.dedupe(extra);
+  if (!includeLab || !VulnscanChecks.enabled(enabledChecks, "lab.paths")) return result();
   if (!controller.canRequest()) {
     onStage("lab", "stopped");
-    return VulnscanFindings.dedupe(extra);
+    return result();
   }
   onStage("lab", "running");
 
@@ -1072,7 +1410,7 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
 
   onStage("lab", controller.getSummary().stoppedReason ? "stopped" : "complete");
 
-  return VulnscanFindings.dedupe(extra);
+  return result();
 }
 
 function renderFindings(data) {
@@ -1134,13 +1472,19 @@ function renderOverview(scan) {
   const categories = Object.keys(counts).sort(function (left, right) { return counts[right] - counts[left]; }).slice(0, 8);
   const requestText = scan.requestSummary && scan.requestSummary.mode !== "passive" ?
     scan.requestSummary.attempted + " request" + (scan.requestSummary.attempted === 1 ? "" : "s") : "no active requests";
-  const limited = scan.scanLimits && (scan.scanLimits.sourceTruncated || scan.scanLimits.domTruncated || scan.scanLimits.findingsTruncated || scan.scanLimits.secretsTruncated);
+  const limited = scan.scanLimits && (scan.scanLimits.sourceTruncated || scan.scanLimits.domTruncated || scan.scanLimits.findingsTruncated || scan.scanLimits.secretsTruncated || scan.scanLimits.surfaceTruncated);
+  const coverage = (scan.coverage || []).filter(function (entry) { return entry.status !== "complete"; });
   resultOverviewEl.innerHTML = '<div class="overview-main"><strong>' + escapeHtml(sourceLabel(scan.scanMode)) +
     '</strong><span>' + scan.summary.findings + ' actionable · ' + scan.summary.review + ' review · ' +
-    scan.checksRun.length + ' checks · ' + requestText + '</span></div>' +
+    scan.checksRun.length + ' checks · ' + requestText + '</span><button class="btn ghost open-scan-map">Open scan map</button></div>' +
     '<div class="overview-categories">' + categories.map(function (category) {
       return '<span>' + escapeHtml(categoryLabel(category)) + ' <strong>' + counts[category] + '</strong></span>';
-    }).join("") + "</div>" + (limited ? '<div class="scan-limit-note">Coverage was capped by a scanner safety limit. Review the Scan health result before relying on completeness.</div>' : "");
+    }).join("") + "</div>" + (limited ? '<div class="scan-limit-note">Coverage was capped by a scanner safety limit. Review the Scan health result before relying on completeness.</div>' : "") +
+    (coverage.length ? '<div class="scan-limit-note">Some active checks had limited coverage: ' + escapeHtml(coverage.map(function (entry) {
+      return entry.checkId + " (" + entry.status + ")";
+    }).join(", ")) + '.</div>' : "");
+  const openMap = resultOverviewEl.querySelector(".open-scan-map");
+  if (openMap) openMap.addEventListener("click", function () { openScanMap(scan, openMap); });
   resultOverviewEl.hidden = false;
 }
 
@@ -1334,7 +1678,7 @@ function saveToHistory(scan) {
   chrome.storage.local.get("scanHistory", function (data) {
     const history = data.scanHistory || [];
     history.unshift({
-      schemaVersion: 7,
+      schemaVersion: 8,
       scanId: scan.scanId,
       url: scan.url,
       urlFingerprint: scan.urlFingerprint,
@@ -1348,6 +1692,8 @@ function saveToHistory(scan) {
       stageSummary: scan.stageSummary,
       checksRun: scan.checksRun,
       scanLimits: scan.scanLimits,
+      surface: VulnscanFindings.normalizeSurface(scan.surface),
+      coverage: VulnscanFindings.normalizeCoverage(scan.coverage),
       findings: scan.findings.map(exportFinding),
       comparisonReady: true
     });
@@ -1362,15 +1708,21 @@ function loadHistory() {
       historyList.innerHTML = '<div class="empty-hint">No history yet</div>';
       return;
     }
-    historyList.innerHTML = history.map(function (entry) {
+    historyList.innerHTML = history.map(function (entry, index) {
       const findingCount = Number.isInteger(entry.findingsCount) ? entry.findingsCount : 0;
       const reviewCount = Number.isInteger(entry.reviewCount) ? entry.reviewCount : 0;
       const risk = entry.risk || "legacy";
       const checkCount = Array.isArray(entry.checksRun) ? entry.checksRun.length : 0;
       return '<div class="hist-item"><div class="hist-url">' + escapeHtml(entry.url) + "</div>" +
         '<div class="hist-meta">' + escapeHtml(entry.scanMode || "legacy") + " · " + escapeHtml(risk) + " · " + findingCount + " findings · " + reviewCount +
-        " review · " + (checkCount ? checkCount + " checks · " : "") + new Date(entry.timestamp).toLocaleString() + "</div></div>";
+        " review · " + (checkCount ? checkCount + " checks · " : "") + new Date(entry.timestamp).toLocaleString() + '</div><button class="btn ghost history-map" data-history-index="' + index + '">Open map</button></div>';
     }).join("");
+    historyList.querySelectorAll(".history-map").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const scan = history[Number.parseInt(button.getAttribute("data-history-index"), 10)];
+        if (scan) openScanMap(scan, button);
+      });
+    });
   });
 }
 
@@ -1429,11 +1781,36 @@ function getCapturedHeaders(tabId) {
   });
 }
 
+async function collectSourceMapCandidates(tabId, pageUrl) {
+  const results = await executeScript({
+    target: { tabId: tabId },
+    func: function () {
+      const currentOrigin = location.origin;
+      const urls = [];
+      Array.from(document.scripts || []).forEach(function (script) {
+        if (!script.src) return;
+        try {
+          const url = new URL(script.src, location.href);
+          if (url.origin === currentOrigin && !urls.includes(url.href)) urls.push(url.href);
+        } catch (e) {}
+      });
+      return { urls: urls.slice(-3), total: urls.length, truncated: urls.length > 3 };
+    }
+  });
+  const value = results && results[0] && results[0].result;
+  if (!value || !Array.isArray(value.urls)) return { urls: [], total: 0, truncated: false };
+  const origin = new URL(pageUrl).origin;
+  const urls = value.urls.filter(function (url) {
+    try { return new URL(url).origin === origin; } catch (e) { return false; }
+  }).slice(0, 3);
+  return { urls: urls, total: Math.max(urls.length, Math.min(1000, Number(value.total) || 0)), truncated: value.truncated === true };
+}
+
 async function waitForScanResult(scanId, pageUrl) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const stored = await storageGet("lastScan");
-    if (stored && stored.schemaVersion === 7 && stored.scanId === scanId && stored.urlFingerprint === urlFingerprint(pageUrl)) {
+    if (stored && stored.schemaVersion === 8 && stored.scanId === scanId && stored.urlFingerprint === urlFingerprint(pageUrl)) {
       return stored;
     }
     await new Promise(function (resolve) { setTimeout(resolve, 100); });
@@ -1567,13 +1944,18 @@ async function runScan() {
       });
       await executeScript({
         target: { tabId: tab.id },
-        files: ["finding-model.js", "scan-checks.js", "content.js"]
+        files: ["finding-model.js", "url-utils.js", "scan-checks.js", "content.js"]
       });
       passive = await waitForScanResult(activeScanId, tab.url);
       stageSummary.passive = "complete";
     }
     renderStages(stageSummary, true);
     let activeFindings = [];
+    let activeCoverage = [];
+    let sourceMapCandidates = { urls: [], total: 0, truncated: false };
+    if (VulnscanChecks.enabled(checksRun, "safe.source-maps")) {
+      sourceMapCandidates = await collectSourceMapCandidates(tab.id, tab.url);
+    }
     let requestSummary = { mode: mode, budget: plannedRequests ? budget : 0, attempted: 0, completed: 0, stoppedReason: null };
     let requestEntries = [];
     if (scanCancelled) throw new Error("Scan cancelled");
@@ -1592,12 +1974,14 @@ async function runScan() {
         includeSafe: mode === "safe" || mode === "full",
         includeLab: mode === "lab" || mode === "full",
         enabledChecks: checksRun,
+        sourceMapCandidates: sourceMapCandidates,
         onStage: function (stage, state) {
           stageSummary[stage] = state;
           renderStages(stageSummary, true);
           if (state === "running") setProgress(stage === "safe" ? "safe active checks..." : "soft-404-aware path discovery...");
         }
       });
+      activeCoverage = activeFindings.coverage || [];
       requestEntries = currentRequestController.getLog();
       requestSummary = currentRequestController.getSummary();
       requestSummary.mode = mode;
@@ -1614,7 +1998,7 @@ async function runScan() {
     const limited = applyFindingLimits((passive.findings || []).concat(headerFindings, activeFindings), passive.scanLimits);
     const findings = limited.findings;
     const scan = {
-      schemaVersion: 7,
+      schemaVersion: 8,
       scanId: activeScanId,
       scanMode: mode,
       url: redactUrl(tab.url),
@@ -1627,7 +2011,9 @@ async function runScan() {
       requestSummary: requestSummary,
       stageSummary: stageSummary,
       checksRun: checksRun,
-      scanLimits: limited.scanLimits
+      scanLimits: limited.scanLimits,
+      surface: VulnscanFindings.normalizeSurface(passive.surface),
+      coverage: VulnscanFindings.normalizeCoverage(activeCoverage)
     };
     chrome.storage.local.set({ lastScan: scan });
     saveToHistory(scan);
@@ -1685,7 +2071,8 @@ function exportFinding(finding) {
     location: finding.location,
     selector: finding.selector,
     source: finding.source,
-    occurrences: finding.occurrences
+    occurrences: finding.occurrences,
+    surfaceRefs: finding.surfaceRefs || []
   };
 }
 
@@ -1697,6 +2084,14 @@ function exportInvestigation(finding) {
     priority: priority,
     impact: guidance.impact,
     remediation: guidance.remediation,
+    exploitability: {
+      level: guidance.exploitability.level,
+      summary: guidance.exploitability.plainLanguage,
+      observed: guidance.exploitability.observed,
+      prerequisites: guidance.exploitability.prerequisites,
+      possibleImpact: guidance.exploitability.possibleImpact,
+      weakeningEvidence: guidance.exploitability.weakens
+    },
     investigationSteps: [finding.verification].concat(guidance.steps).filter(Boolean).filter(function (step, index, list) {
       return list.indexOf(step) === index;
     })
@@ -1724,6 +2119,13 @@ function buildMarkdownReport(scan) {
   markdown += "**Stages:** " + ["passive", "headers", "safe", "lab"].map(function (stage) {
     return categoryLabel(stage) + " " + ((scan.stageSummary && scan.stageSummary[stage]) || "unknown");
   }).join(" · ") + "\n\n";
+  if (scan.coverage && scan.coverage.length) {
+    markdown += "**Active coverage:** " + scan.coverage.map(function (entry) {
+      return entry.checkId + " " + entry.status + " (" + entry.inspected + " inspected, " + entry.matched + " matched)";
+    }).join(" · ") + "\n\n";
+  }
+  const surface = VulnscanFindings.normalizeSurface(scan.surface);
+  markdown += "**Observed surface:** " + surface.nodes.length + " nodes · " + surface.edges.length + " relationships" + (surface.truncated ? " · collection limit reached" : "") + "\n\n";
   if (scan.comparison) {
     markdown += "**Comparison:** " + scan.comparison.new + " new · " + scan.comparison.changed + " changed · " +
       scan.comparison.resolved + " resolved · " + scan.comparison.unchanged + " unchanged\n\n";
@@ -1745,6 +2147,8 @@ function buildMarkdownReport(scan) {
         if (finding.location) markdown += "  - Affected location: " + finding.location + "\n";
         markdown += "  - Evidence: " + finding.evidence + "\n";
         markdown += "  - Why it matters: " + guidance.impact + "\n";
+        markdown += "  - Exploitability: " + guidance.exploitability.plainLanguage + "\n";
+        markdown += "  - Required conditions: " + guidance.exploitability.prerequisites.join("; ") + "\n";
         markdown += "  - Recommended action: " + guidance.remediation + "\n";
         markdown += "  - Verify: " + finding.verification + "\n";
       });
@@ -1760,8 +2164,8 @@ function buildMarkdownReport(scan) {
 
 function buildJsonReport(scan) {
   return {
-    reportVersion: "6.1",
-    schemaVersion: 7,
+    reportVersion: "6.2",
+    schemaVersion: 8,
     url: scan.url,
     scanId: scan.scanId,
     scanMode: scan.scanMode,
@@ -1772,6 +2176,8 @@ function buildJsonReport(scan) {
     stageSummary: scan.stageSummary,
     checksRun: VulnscanChecks.effective(scan.checksRun, scan.scanMode),
     scanLimits: scan.scanLimits,
+    surface: VulnscanFindings.normalizeSurface(scan.surface),
+    coverage: VulnscanFindings.normalizeCoverage(scan.coverage),
     comparison: scan.comparison || null,
     secretsRedacted: true,
     findings: scan.findings.map(exportInvestigation)
@@ -2038,7 +2444,81 @@ if (toggleRequestLogBtn) {
   });
 }
 
+document.querySelectorAll(".scan-map-view").forEach(function (button) {
+  button.addEventListener("click", function () {
+    mapView = button.getAttribute("data-map-view") === "flow" ? "flow" : "surface";
+    document.querySelectorAll(".scan-map-view").forEach(function (item) {
+      item.classList.toggle("active", item === button);
+    });
+    renderScanMap();
+  });
+});
+[scanMapSearch, scanMapKind, scanMapBucket, scanMapSeverity].forEach(function (control) {
+  if (!control) return;
+  control.addEventListener(control === scanMapSearch ? "input" : "change", renderScanMap);
+});
+if (scanMapClose) scanMapClose.addEventListener("click", closeScanMap);
+if (scanMapBackdrop) scanMapBackdrop.addEventListener("click", closeScanMap);
+if (scanMapZoomIn) scanMapZoomIn.addEventListener("click", function () {
+  mapScale = Math.min(2.5, mapScale + 0.15);
+  applyMapTransform();
+});
+if (scanMapZoomOut) scanMapZoomOut.addEventListener("click", function () {
+  mapScale = Math.max(0.45, mapScale - 0.15);
+  applyMapTransform();
+});
+if (scanMapFit) scanMapFit.addEventListener("click", resetMapTransform);
+if (scanMapReset) scanMapReset.addEventListener("click", function () {
+  mapView = mapScanData && mapScanData.surface.nodes.some(function (node) { return node.kind !== "target"; }) ? "surface" : "flow";
+  if (scanMapSearch) scanMapSearch.value = "";
+  if (scanMapKind) scanMapKind.value = "all";
+  if (scanMapBucket) scanMapBucket.value = "all";
+  if (scanMapSeverity) scanMapSeverity.value = "all";
+  document.querySelectorAll(".scan-map-view").forEach(function (button) {
+    button.classList.toggle("active", button.getAttribute("data-map-view") === mapView);
+  });
+  renderScanMap();
+});
+if (scanMapViewport) {
+  scanMapViewport.addEventListener("wheel", function (event) {
+    event.preventDefault();
+    mapScale = Math.max(0.45, Math.min(2.5, mapScale + (event.deltaY < 0 ? 0.12 : -0.12)));
+    applyMapTransform();
+  }, { passive: false });
+  scanMapViewport.addEventListener("pointerdown", function (event) {
+    if (event.button !== 0) return;
+    mapDragging = true;
+    mapPointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    scanMapViewport.classList.add("dragging");
+    if (typeof scanMapViewport.setPointerCapture === "function") scanMapViewport.setPointerCapture(event.pointerId);
+  });
+  scanMapViewport.addEventListener("pointermove", function (event) {
+    if (!mapDragging || !mapPointer || event.pointerId !== mapPointer.id) return;
+    const bounds = typeof scanMapViewport.getBoundingClientRect === "function" ? scanMapViewport.getBoundingClientRect() : { width: 1, height: 1 };
+    const viewBox = scanMapSvg && scanMapSvg.viewBox && scanMapSvg.viewBox.baseVal;
+    const ratioX = viewBox && bounds.width ? viewBox.width / bounds.width : 1;
+    const ratioY = viewBox && bounds.height ? viewBox.height / bounds.height : 1;
+    mapPanX += (event.clientX - mapPointer.x) * ratioX;
+    mapPanY += (event.clientY - mapPointer.y) * ratioY;
+    mapPointer.x = event.clientX;
+    mapPointer.y = event.clientY;
+    applyMapTransform();
+  });
+  const stopMapDrag = function (event) {
+    if (!mapDragging || (mapPointer && event.pointerId !== mapPointer.id)) return;
+    mapDragging = false;
+    mapPointer = null;
+    scanMapViewport.classList.remove("dragging");
+  };
+  scanMapViewport.addEventListener("pointerup", stopMapDrag);
+  scanMapViewport.addEventListener("pointercancel", stopMapDrag);
+}
+
 document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape" && scanMapDialog && !scanMapDialog.hidden) {
+    closeScanMap();
+    return;
+  }
   if (event.key === "Escape" && findingDrawer && !findingDrawer.hidden) {
     closeFindingDrawer();
     return;
@@ -2054,7 +2534,7 @@ chrome.storage.local.get("lastScan", function (data) {
   if (!data.lastScan) return;
   if (!renderFindings(data.lastScan)) {
     chrome.storage.local.remove("lastScan", function () {
-      setStatus("v6 needs a fresh scan — incompatible cached results were cleared");
+      setStatus("This saved result needs a fresh v6.2 scan — the incompatible cache was cleared");
     });
   }
 });
@@ -2075,7 +2555,9 @@ chrome.storage.local.get("requestBudget", function (data) {
   if (data.requestBudget) requestBudgetEl.value = String(VulnscanRequests.clampBudget(data.requestBudget));
 });
 chrome.storage.local.get("enabledChecks", function (data) {
-  applySavedChecks(data.enabledChecks);
+  const saved = data.enabledChecks;
+  const oldAll = Array.isArray(saved) && checkProfileMatches(saved, VulnscanChecks.v61All());
+  applySavedChecks(saved === undefined || oldAll ? VulnscanChecks.all() : saved);
 });
 chrome.storage.local.get("findingTriage", function (data) {
   triageStates = data.findingTriage && typeof data.findingTriage === "object" ? data.findingTriage : {};
