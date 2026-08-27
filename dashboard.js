@@ -140,6 +140,15 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+function markdownText(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/([\\`*_{}\[\]()#+\-.!|~])/g, "\\$1");
+}
+
 function setProgress(message) {
   if (!message) {
     progressEl.style.display = "none";
@@ -214,6 +223,48 @@ function requestSitePermission(origins) {
     } catch (error) {
       reject(error);
     }
+  });
+}
+
+function removeSitePermission(origins) {
+  return new Promise(function (resolve) {
+    let finished = false;
+    const complete = function (value) {
+      if (finished) return;
+      if (chrome.runtime.lastError) {
+        finished = true;
+        resolve(false);
+        return;
+      }
+      if (value !== false) {
+        finished = true;
+        resolve(true);
+        return;
+      }
+      if (!chrome.permissions.contains) {
+        finished = true;
+        resolve(false);
+        return;
+      }
+      finished = true;
+      chrome.permissions.contains({ origins: origins }, function (granted) {
+        resolve(!chrome.runtime.lastError && !granted);
+      });
+    };
+    try {
+      const pending = chrome.permissions.remove({ origins: origins }, complete);
+      if (pending && typeof pending.then === "function") pending.then(complete, function () { complete(false); });
+    } catch (error) {
+      complete(false);
+    }
+  });
+}
+
+function endScanContext(message) {
+  return new Promise(function (resolve) {
+    chrome.runtime.sendMessage(message, function (response) {
+      resolve(response || { error: chrome.runtime.lastError ? chrome.runtime.lastError.message : "No response" });
+    });
   });
 }
 
@@ -1786,7 +1837,7 @@ function renderComparison(scan) {
     if (scanMapChanges) scanMapChanges.hidden = false;
     const exportButton = comparisonPanelEl.querySelector(".export-comparison");
     if (exportButton) exportButton.addEventListener("click", function () {
-      downloadBlob(buildComparisonMarkdown(scan, previous, currentComparisonResult), "text/markdown", "vuln-scan-comparison-" + Date.now() + ".md");
+      downloadBlob(buildComparisonMarkdown(scan, previous, currentComparisonResult), "text/markdown", exportFilename(scan, "comparison", "md"));
       setStatus("Sanitized comparison report exported");
     });
     const openChanges = comparisonPanelEl.querySelector(".open-change-map");
@@ -2068,6 +2119,12 @@ async function runScan() {
   currentRequestController = null;
   scanCancelled = false;
   let stageSummary = blankStageSummary(requestMode());
+  let grantedOriginPattern = "";
+  let scanContextStarted = false;
+  let scanCompleted = false;
+  let headerCaptureNeeded = false;
+  let scanTargetTabId = null;
+  let scanTargetUrl = "";
   renderStages(stageSummary, true);
   setStatus("// scanning...");
   setProgress("resolving selected tab...");
@@ -2111,6 +2168,7 @@ async function runScan() {
       setProgress(null);
       return;
     }
+    grantedOriginPattern = originPattern;
 
     tab = await getSelectedTab();
     if (!tab || !Number.isInteger(tab.id) || !tab.url) throw new Error("The selected tab is no longer available");
@@ -2137,7 +2195,11 @@ async function runScan() {
       }
     }
     const capturedHeaders = await getCapturedHeaders(tab.id);
-    const headersAreCurrent = capturedHeaders.statusCode > 0 && comparableUrl(capturedHeaders.url) === comparableUrl(tab.url);
+    const headersAreCurrent = capturedHeaders.statusCode > 0 && (capturedHeaders.urlFingerprint
+      ? capturedHeaders.urlFingerprint === exactUrlFingerprint(tab.url)
+      : comparableUrl(capturedHeaders.url) === comparableUrl(tab.url));
+    scanTargetTabId = tab.id;
+    scanTargetUrl = tab.url;
 
     activeScanId = "s" + Date.now();
     const scanStart = await new Promise(function (resolve) {
@@ -2150,6 +2212,7 @@ async function runScan() {
       }, function (response) { resolve(response || {}); });
     });
     if (scanStart.error) throw new Error(scanStart.error);
+    scanContextStarted = true;
 
     showTarget(tab.url, tab.favIconUrl || "");
     if (stageSummary.headers !== "skipped") stageSummary.headers = "running";
@@ -2163,8 +2226,9 @@ async function runScan() {
       headerFindings = analyzeHeaders(capturedHeaders.headers || [], tab.url, checksRun);
       stageSummary.headers = "complete";
     } else {
-      headerResults.innerHTML = '<div class="empty-hint">Headers were not captured for this page load. Refresh the target tab, then scan again to include them.</div>';
+      headerResults.innerHTML = '<div class="empty-hint">Headers were not captured for this page load. Refresh the target tab within 10 minutes, then scan again to include them.</div>';
       stageSummary.headers = "unavailable";
+      headerCaptureNeeded = true;
     }
     renderStages(stageSummary, true);
     let passive = { findings: [] };
@@ -2255,15 +2319,29 @@ async function runScan() {
     saveToHistory(scan);
     renderFindings(scan);
     setProgress(null);
+    scanCompleted = true;
     const stopped = requestSummary.stoppedReason ? " — requests stopped: " + requestSummary.stoppedReason : "";
-    setStatus("// scan complete — " + scan.summary.findings + " finding(s), " + scan.summary.review + " to review" + stopped);
+    const headerNote = headerCaptureNeeded ? " — refresh the target within 10 minutes, then scan again for headers" : "";
+    setStatus("// scan complete — " + scan.summary.findings + " finding(s), " + scan.summary.review + " to review" + stopped + headerNote);
   } catch (error) {
     setProgress(null);
     setStatus(error.message === "Scan cancelled" ? "// scan cancelled" : "// error: " + error.message);
   } finally {
-    if (activeScanId) {
-      chrome.runtime.sendMessage({ type: "scan_end", scanId: activeScanId }, function () {});
+    let accessHandled = false;
+    if (activeScanId && scanContextStarted) {
+      const ended = await endScanContext({
+        type: "scan_end",
+        scanId: activeScanId,
+        retainHeaderCapture: scanCompleted && headerCaptureNeeded,
+        tabId: scanTargetTabId,
+        url: scanTargetUrl
+      });
+      accessHandled = !ended.error && (ended.siteAccessRetained === true || ended.siteAccessReleased !== false);
       activeScanId = null;
+    }
+    if (grantedOriginPattern && !accessHandled) {
+      const released = await removeSitePermission([grantedOriginPattern]);
+      if (!released) setStatus(statusBar.textContent + " — site access could not be released; use Clear all data");
     }
     scanning = false;
     scanBtn.disabled = false;
@@ -2346,29 +2424,37 @@ function downloadBlob(content, type, filename) {
   URL.revokeObjectURL(url);
 }
 
+function exportFilename(scan, label, extension) {
+  let host = "report";
+  try { host = new URL(scan && scan.url ? scan.url : "").hostname || host; } catch (e) {}
+  host = host.toLowerCase().replace(/[^a-z0-9.-]+/g, "-").replace(/^-+|-+$/g, "") || "report";
+  const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/:/g, "-");
+  return "vulnscan-" + host + "-" + label + "-" + stamp + "." + extension;
+}
+
 function buildComparisonMarkdown(current, previous, state) {
   const comparison = state && state.comparison;
   if (!comparison) return "# VulnScan Comparison\n\nNo compatible comparison is available.\n";
   const graph = VulnscanMap.buildComparison(current, previous, { comparableStages: state.comparableStages });
   let markdown = "# VulnScan Comparison\n\n";
-  markdown += "**Target:** " + current.url + "\n\n";
-  markdown += "**Current scan:** " + new Date(current.timestamp).toISOString() + "\n\n";
-  markdown += "**Previous scan:** " + new Date(previous.timestamp).toISOString() + "\n\n";
-  markdown += "**Comparable stages:** " + state.comparableStages.join(", ") + "\n\n";
+  markdown += "**Target:** " + markdownText(current.url) + "\n\n";
+  markdown += "**Current scan:** " + markdownText(new Date(current.timestamp).toISOString()) + "\n\n";
+  markdown += "**Previous scan:** " + markdownText(new Date(previous.timestamp).toISOString()) + "\n\n";
+  markdown += "**Comparable stages:** " + state.comparableStages.map(markdownText).join(", ") + "\n\n";
   markdown += "**Finding changes:** " + comparison.new.length + " new · " + comparison.changed.length + " changed · " + comparison.resolved.length + " resolved · " + comparison.unchanged.length + " unchanged\n\n";
   if (graph.comparison) {
     markdown += "**Surface changes:** " + graph.comparison.surface.new + " new · " + graph.comparison.surface.changed + " changed · " + graph.comparison.surface.resolved + " resolved · " + graph.comparison.surface.unchanged + " unchanged\n\n";
   }
   function list(title, items, value) {
-    markdown += "## " + title + "\n\n";
+    markdown += "## " + markdownText(title) + "\n\n";
     if (!items.length) {
       markdown += "None.\n\n";
       return;
     }
     items.forEach(function (item) {
       const finding = value(item);
-      markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
-      if (finding.location) markdown += "  - Affected location: " + finding.location + "\n";
+      markdown += "- **[" + markdownText(finding.severity.toUpperCase()) + "]** " + markdownText(finding.type) + " — " + markdownText(finding.detail) + "\n";
+      if (finding.location) markdown += "  - Affected location: " + markdownText(finding.location) + "\n";
     });
     markdown += "\n";
   }
@@ -2379,9 +2465,9 @@ function buildComparisonMarkdown(current, previous, state) {
     const fields = ["severity", "confidence", "bucket", "type", "detail", "evidence", "verification", "location", "occurrences"].filter(function (field) {
       return String(pair.current[field] || "") !== String(pair.previous[field] || "");
     });
-    markdown += "- **" + pair.current.type + "** — changed " + fields.join(", ") + "\n";
-    markdown += "  - Current: [" + pair.current.severity + "] " + pair.current.detail + "\n";
-    markdown += "  - Previous: [" + pair.previous.severity + "] " + pair.previous.detail + "\n";
+    markdown += "- **" + markdownText(pair.current.type) + "** — changed " + fields.map(markdownText).join(", ") + "\n";
+    markdown += "  - Current: [" + markdownText(pair.current.severity) + "] " + markdownText(pair.current.detail) + "\n";
+    markdown += "  - Previous: [" + markdownText(pair.previous.severity) + "] " + markdownText(pair.previous.detail) + "\n";
   });
   markdown += "\n";
   list("Resolved", comparison.resolved, function (finding) { return finding; });
@@ -2392,55 +2478,67 @@ function buildComparisonMarkdown(current, previous, state) {
 function buildMarkdownReport(scan) {
   const findings = scan.findings.filter(function (finding) { return finding.bucket === "finding"; });
   const review = scan.findings.filter(function (finding) { return finding.bucket === "review"; });
-  let markdown = "# VulnScan Report\n\n";
-  markdown += "**URL:** " + scan.url + "\n\n";
-  markdown += "**Mode:** " + scan.scanMode + "\n\n";
-  markdown += "**Risk:** " + scan.risk + "\n\n";
-  markdown += "**Time:** " + new Date(scan.timestamp).toISOString() + "\n\n";
-  markdown += "**Checks run:** " + VulnscanChecks.effective(scan.checksRun, scan.scanMode).join(", ") + "\n\n";
-  markdown += "**Stages:** " + ["passive", "headers", "safe", "lab"].map(function (stage) {
-    return categoryLabel(stage) + " " + ((scan.stageSummary && scan.stageSummary[stage]) || "unknown");
-  }).join(" · ") + "\n\n";
+  const checks = VulnscanChecks.effective(scan.checksRun, scan.scanMode);
+  let markdown = "# VulnScan Assessment Report\n\n";
+  markdown += "## Summary\n\n";
+  markdown += "| Field | Value |\n| --- | --- |\n";
+  markdown += "| Target | " + markdownText(scan.url) + " |\n";
+  markdown += "| Scan time | " + markdownText(new Date(scan.timestamp).toISOString()) + " |\n";
+  markdown += "| Mode | " + markdownText(sourceLabel(scan.scanMode)) + " |\n";
+  markdown += "| Risk | " + markdownText(String(scan.risk || "unknown").toUpperCase()) + " |\n";
+  markdown += "| Actionable findings | " + findings.length + " |\n";
+  markdown += "| Review items | " + review.length + " |\n\n";
+  markdown += "## Coverage\n\n";
+  markdown += "**Checks run:** " + (checks.length ? checks.map(markdownText).join(", ") : "None") + "\n\n";
+  markdown += "**Stages:**\n\n" + ["passive", "headers", "safe", "lab"].map(function (stage) {
+    return "- " + markdownText(categoryLabel(stage)) + ": " + markdownText((scan.stageSummary && scan.stageSummary[stage]) || "unknown");
+  }).join("\n") + "\n\n";
   if (scan.coverage && scan.coverage.length) {
-    markdown += "**Active coverage:** " + scan.coverage.map(function (entry) {
-      return entry.checkId + " " + entry.status + " (" + entry.inspected + " inspected, " + entry.matched + " matched)";
-    }).join(" · ") + "\n\n";
+    markdown += "**Active-check coverage:**\n\n" + scan.coverage.map(function (entry) {
+      return "- " + markdownText(entry.checkId) + ": " + markdownText(entry.status) + " — " + Number(entry.inspected || 0) + " inspected, " + Number(entry.matched || 0) + " matched";
+    }).join("\n") + "\n\n";
   }
   const surface = VulnscanFindings.normalizeSurface(scan.surface);
-  markdown += "**Observed surface:** " + surface.nodes.length + " nodes · " + surface.edges.length + " relationships" + (surface.truncated ? " · collection limit reached" : "") + "\n\n";
+  markdown += "**Observed surface:** " + surface.nodes.length + " nodes, " + surface.edges.length + " relationships" + (surface.truncated ? " — collection limit reached" : "") + "\n\n";
   if (scan.comparison) {
     markdown += "**Comparison:** " + scan.comparison.new + " new · " + scan.comparison.changed + " changed · " +
       scan.comparison.resolved + " resolved · " + scan.comparison.unchanged + " unchanged\n\n";
   }
-  markdown += "## Findings\n\n";
-  if (!findings.length) markdown += "No actionable findings.\n";
-  function appendGroups(items) {
+  let itemNumber = 0;
+  function appendGroups(items, emptyMessage) {
+    if (!items.length) {
+      markdown += emptyMessage + "\n\n";
+      return;
+    }
     const categories = Array.from(new Set(items.map(function (finding) { return finding.category; }))).sort();
     categories.forEach(function (category) {
-      markdown += "\n### " + categoryLabel(category) + "\n\n";
+      markdown += "\n### " + markdownText(categoryLabel(category)) + "\n\n";
       items.filter(function (finding) { return finding.category === category; }).forEach(function (finding) {
         const guidance = VulnscanGuidance.get(finding);
         const priority = VulnscanGuidance.priority(finding);
-        markdown += "- **[" + finding.severity.toUpperCase() + "]** " + finding.type + " — " + finding.detail + "\n";
-        markdown += "  - Confidence: " + finding.confidence + "\n";
-        markdown += "  - Workflow: " + triageLabel(triageStateFor(finding)) + "\n";
-        markdown += "  - Priority: " + priority.label + " (" + priority.score + ")\n";
-        markdown += "  - Stage: " + sourceLabel(finding.source) + "\n";
-        if (finding.location) markdown += "  - Affected location: " + finding.location + "\n";
-        markdown += "  - Evidence: " + finding.evidence + "\n";
-        markdown += "  - Why it matters: " + guidance.impact + "\n";
-        markdown += "  - Exploitability: " + guidance.exploitability.plainLanguage + "\n";
-        markdown += "  - Required conditions: " + guidance.exploitability.prerequisites.join("; ") + "\n";
-        markdown += "  - Recommended action: " + guidance.remediation + "\n";
-        markdown += "  - Verify: " + finding.verification + "\n";
+        itemNumber++;
+        markdown += "#### " + itemNumber + ". [" + markdownText(finding.severity.toUpperCase()) + "] " + markdownText(finding.type) + "\n\n";
+        markdown += markdownText(finding.detail || "No additional detail recorded.") + "\n\n";
+        markdown += "- **Confidence:** " + markdownText(finding.confidence) + "\n";
+        markdown += "- **Workflow:** " + markdownText(triageLabel(triageStateFor(finding))) + "\n";
+        markdown += "- **Priority:** " + markdownText(priority.label) + " (" + Number(priority.score || 0) + ")\n";
+        markdown += "- **Stage:** " + markdownText(sourceLabel(finding.source)) + "\n";
+        if (finding.location) markdown += "- **Affected location:** " + markdownText(finding.location) + "\n";
+        markdown += "- **Evidence:** " + markdownText(finding.evidence || "No additional evidence recorded.") + "\n";
+        markdown += "- **Why it matters:** " + markdownText(guidance.impact) + "\n";
+        markdown += "- **Exploitability:** " + markdownText(guidance.exploitability.plainLanguage) + "\n";
+        markdown += "- **Required conditions:** " + (guidance.exploitability.prerequisites.length ? guidance.exploitability.prerequisites.map(markdownText).join("; ") : "None recorded") + "\n";
+        markdown += "- **Recommended action:** " + markdownText(guidance.remediation) + "\n";
+        markdown += "- **How to verify:** " + markdownText(finding.verification || "Review the affected behavior manually.") + "\n\n";
       });
     });
   }
-  appendGroups(findings);
-  markdown += "\n## Review\n\n";
-  if (!review.length) markdown += "No additional review items.\n";
-  appendGroups(review);
-  markdown += "\n> Secret values are redacted. Use the separate full-secret export only when you need the raw values.\n";
+  markdown += "## Findings (" + findings.length + ")\n\n";
+  appendGroups(findings, "No actionable findings.");
+  itemNumber = 0;
+  markdown += "## Review (" + review.length + ")\n\n";
+  appendGroups(review, "No additional review items.");
+  markdown += "> Secret values are redacted. Use the separate full-secret export only when you need the raw values.\n";
   return markdown;
 }
 
@@ -2471,7 +2569,7 @@ function exportRedactedMarkdown() {
     setStatus("// nothing to export");
     return;
   }
-  downloadBlob(buildMarkdownReport(lastScanData), "text/markdown", "vuln-scan-" + Date.now() + ".md");
+  downloadBlob(buildMarkdownReport(lastScanData), "text/markdown", exportFilename(lastScanData, "report", "md"));
   setStatus("// redacted Markdown report exported");
 }
 
@@ -2480,8 +2578,22 @@ function exportRedactedJson() {
     setStatus("// nothing to export");
     return;
   }
-  downloadBlob(JSON.stringify(buildJsonReport(lastScanData), null, 2), "application/json", "vuln-scan-" + Date.now() + ".json");
+  downloadBlob(JSON.stringify(buildJsonReport(lastScanData), null, 2) + "\n", "application/json", exportFilename(lastScanData, "report", "json"));
   setStatus("// redacted JSON report exported");
+}
+
+function buildSecretExport(scan, vault, createdAt) {
+  let text = "VulnScan Full Secret Values\n";
+  text += "===========================\n\n";
+  text += "Handle this file securely. It contains unredacted values.\n\n";
+  text += "Target: " + scan.url + "\n";
+  text += "Scan ID: " + scan.scanId + "\n";
+  text += "Created: " + createdAt + "\n";
+  text += "Values: " + vault.length + "\n\n";
+  vault.forEach(function (value, index) {
+    text += "--- Value " + (index + 1) + " of " + vault.length + " ---\n" + value + "\n\n";
+  });
+  return text;
 }
 
 function exportRawSecrets() {
@@ -2490,12 +2602,8 @@ function exportRawSecrets() {
       setStatus("// raw values are unavailable — run a fresh scan with a matching target");
       return;
     }
-    let text = "VulnScan raw secret export\n";
-    text += "Target: " + lastScanData.url + "\n";
-    text += "Scan: " + lastScanData.scanId + "\n";
-    text += "Created: " + new Date().toISOString() + "\n\n";
-    text += vault.join("\n") + "\n";
-    downloadBlob(text, "text/plain", "vuln-scan-secrets-" + Date.now() + ".txt");
+    const text = buildSecretExport(lastScanData, vault, new Date().toISOString());
+    downloadBlob(text, "text/plain", exportFilename(lastScanData, "full-secrets", "txt"));
     setStatus("// full secret values exported — handle the file securely");
   });
 }
@@ -2713,12 +2821,14 @@ if (showFindingMapBtn) {
 if (clearAllDataBtn) {
   clearAllDataBtn.addEventListener("click", function () {
     chrome.storage.local.remove(["lastScan", "scanHistory", "requestBudget", "enabledChecks", "findingTriage"], function () {
-      chrome.runtime.sendMessage({ type: "clear_all_session" }, function () {
+      chrome.runtime.sendMessage({ type: "clear_all_session" }, function (response) {
         triageStates = {};
         applySavedChecks(VulnscanChecks.all());
         clearResults();
         historyList.innerHTML = '<div class="empty-hint">No history yet</div>';
-        setStatus("// all saved scan data cleared");
+        setStatus(response && response.siteAccessCleared === false
+          ? "// saved scan data cleared, but site access could not be removed"
+          : "// all saved scan data and site access cleared");
       });
     });
   });
@@ -2777,7 +2887,7 @@ if (scanMapZoomOut) scanMapZoomOut.addEventListener("click", function () {
 if (scanMapFit) scanMapFit.addEventListener("click", resetMapTransform);
 if (scanMapExport) scanMapExport.addEventListener("click", function () {
   if (!mapGraph) return;
-  downloadBlob(VulnscanMap.exportSvg(mapGraph), "image/svg+xml", "vuln-scan-map-" + Date.now() + ".svg");
+  downloadBlob(VulnscanMap.exportSvg(mapGraph), "image/svg+xml", exportFilename(mapScanData, "scan-map", "svg"));
   setStatus("Sanitized scan map exported");
 });
 if (scanMapFocus) scanMapFocus.addEventListener("click", function () {

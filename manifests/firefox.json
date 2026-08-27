@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Vuln Scanner Ultimate",
-  "version": "6.4.0",
+  "version": "6.4.1",
   "description": "Controlled passive and safe-active webpage security checks. Tool by a085.",
   "permissions": [
     "activeTab",
+    "alarms",
     "scripting",
     "storage",
     "webRequest",

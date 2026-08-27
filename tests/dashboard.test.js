@@ -96,6 +96,9 @@ function createDashboard() {
   let exportSecretsResponse = { secrets: [], available: false };
   let corsProbeResponse = { observed: false, originSent: false, originMatchesExtension: false, originWasNull: false };
   let savedRequestLog = { scanId: null, entries: [], summary: null };
+  let scanEndReleaseResponse = true;
+  const grantedOrigins = new Set();
+  const removedOrigins = [];
   const sentMessages = [];
   const storage = {};
 
@@ -115,7 +118,7 @@ function createDashboard() {
     runtime: {
       lastError: null,
       getURL: function (value) { return "chrome-extension://test/" + (value || ""); },
-      getManifest: function () { return { version: "6.4.0" }; },
+      getManifest: function () { return { version: "6.4.1" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -132,6 +135,12 @@ function createDashboard() {
         }
         if (message.type === "get_request_log") response = savedRequestLog;
         if (message.type === "scan_begin") currentScanId = message.scanId;
+        if (message.type === "scan_end") response = {
+          ok: true,
+          siteAccessRetained: message.retainHeaderCapture === true,
+          siteAccessReleased: message.retainHeaderCapture === true ? undefined : scanEndReleaseResponse
+        };
+        if (message.type === "clear_all_session") response = { ok: true, siteAccessCleared: true };
         if (callback) callback(response);
       }
     },
@@ -161,7 +170,22 @@ function createDashboard() {
         if (onUpdatedListener) onUpdatedListener(tabId, { status: "complete" }, tabResponse);
       }
     },
-    permissions: { request: async function () { return true; } },
+    permissions: {
+      request: function (options, callback) {
+        (options.origins || []).forEach(function (origin) { grantedOrigins.add(origin); });
+        if (callback) callback(true);
+      },
+      remove: function (options, callback) {
+        (options.origins || []).forEach(function (origin) {
+          grantedOrigins.delete(origin);
+          removedOrigins.push(origin);
+        });
+        if (callback) callback(true);
+      },
+      contains: function (options, callback) {
+        callback((options.origins || []).every(function (origin) { return grantedOrigins.has(origin); }));
+      }
+    },
     scripting: {
       executeScript: async function (options) {
         if (options.files && options.files.includes("content.js")) {
@@ -225,11 +249,14 @@ function createDashboard() {
     setRedirects: function (value) { redirectResponse = value; },
     setFetch: function (value) { context.fetch = async function () { fetchCount++; fetchUrls.push(String(arguments[0] || "")); return value.apply(null, arguments); }; },
     setTabResponse: function (value) { tabResponse = value; },
+    setHeaderResponse: function (value) { headerResponse = value; },
+    setScanEndReleaseResponse: function (value) { scanEndReleaseResponse = value; },
     setExportSecrets: function (value) { exportSecretsResponse = value; },
     setCorsProbe: function (value) { corsProbeResponse = value; },
     getReloadCount: function () { return reloadCount; },
     getFetchCount: function () { return fetchCount; },
-    getFetchUrls: function () { return fetchUrls.slice(); }
+    getFetchUrls: function () { return fetchUrls.slice(); },
+    getRemovedOrigins: function () { return removedOrigins.slice(); }
   };
 }
 
@@ -440,6 +467,42 @@ test("passive mode sends no scanner requests or target reloads", async function 
   assert.equal(dashboard.storage.lastScan.scanMode, "passive");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_begin"; }), true);
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_end"; }), true);
+  const scanEnd = dashboard.sentMessages.find(function (message) { return message.type === "scan_end"; });
+  assert.equal(scanEnd.retainHeaderCapture, true);
+  assert.equal(dashboard.getRemovedOrigins().length, 0);
+});
+
+test("releases a granted origin when the selected tab changes before scanning", async function () {
+  const dashboard = createDashboard();
+  await dashboard.context.loadTabs();
+  dashboard.setTabResponse({ id: 3, title: "Other", url: "https://other.test/", active: true, favIconUrl: "" });
+  await dashboard.context.runScan();
+  assert.deepEqual(dashboard.getRemovedOrigins(), ["https://example.test/*"]);
+  assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "scan_begin"; }), false);
+});
+
+test("ends a scan without retaining access when current headers are available", async function () {
+  const dashboard = createDashboard();
+  dashboard.setHeaderResponse({
+    headers: [{ name: "content-security-policy", value: "default-src 'self'" }],
+    url: "https://example.test/",
+    statusCode: 200,
+    capturedAt: Date.now()
+  });
+  await dashboard.context.loadTabs();
+  await dashboard.context.runScan();
+  const scanEnd = dashboard.sentMessages.find(function (message) { return message.type === "scan_end"; });
+  assert.equal(scanEnd.retainHeaderCapture, false);
+  assert.equal(dashboard.storage.lastScan.stageSummary.headers, "complete");
+});
+
+test("retries site-access removal when the scan-end cleanup reports failure", async function () {
+  const dashboard = createDashboard();
+  dashboard.setHeaderResponse({ headers: [], url: "https://example.test/", statusCode: 200, capturedAt: Date.now() });
+  dashboard.setScanEndReleaseResponse(false);
+  await dashboard.context.loadTabs();
+  await dashboard.context.runScan();
+  assert.deepEqual(dashboard.getRemovedOrigins(), ["https://example.test/*"]);
 });
 
 test("safe active mode requires confirmation and uses its request budget", async function () {
@@ -643,6 +706,71 @@ test("redacted reports never include raw secret values", function () {
   dashboard.element("secretExportCheck").listeners.change();
   dashboard.element("secretExportConfirm").listeners.click();
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), true);
+});
+
+test("Markdown exports render page-controlled text as inert content", function () {
+  const dashboard = createDashboard();
+  const model = dashboard.context.VulnscanFindings;
+  const attack = '<img src=x onerror=alert(1)>\n# forged heading\n[run](javascript:alert(1))\n```html\n<script>alert(1)</script>\n```\n| fake | table |';
+  const finding = model.normalize({
+    checkId: "source.csp-meta",
+    severity: "info",
+    confidence: "medium",
+    bucket: "review",
+    category: "source",
+    type: attack,
+    detail: attack,
+    evidence: attack,
+    verification: attack,
+    location: attack,
+    source: "passive"
+  });
+  const scan = {
+    schemaVersion: 8,
+    scanId: "scan-markdown",
+    scanMode: "passive",
+    url: "https://example.test/",
+    urlFingerprint: model.key("https://example.test/"),
+    timestamp: 20,
+    risk: "review",
+    findings: [finding],
+    checksRun: ["passive.source"],
+    stageSummary: { passive: "complete", headers: "skipped", safe: "skipped", lab: "skipped" },
+    coverage: [],
+    surface: { nodes: [], edges: [], truncated: false }
+  };
+  const report = dashboard.context.buildMarkdownReport(scan);
+  assert.match(report, /## Summary\n\n\| Field \| Value \|/);
+  assert.match(report, /## Findings \(0\)/);
+  assert.match(report, /## Review \(1\)/);
+  assert.match(report, /#### 1\. \[INFO\]/);
+  assert.doesNotMatch(report, /<img|<script|\n# forged|\[run\]\(javascript:|```html|\| fake \| table \|/);
+  assert.match(report, /&lt;img/);
+  assert.match(report, /\\# forged heading/);
+  assert.equal(dashboard.context.buildJsonReport(scan).findings[0].type, attack);
+
+  const previousFinding = model.normalize(Object.assign({}, finding, { detail: "previous " + attack }));
+  const previous = Object.assign({}, scan, { scanId: "scan-previous", timestamp: 10, findings: [previousFinding] });
+  const comparison = model.compare(scan.findings, previous.findings);
+  const comparisonReport = dashboard.context.buildComparisonMarkdown(scan, previous, {
+    comparison: comparison,
+    comparableStages: ["passive"]
+  });
+  assert.doesNotMatch(comparisonReport, /<img|<script|\n# forged|\[run\]\(javascript:|```html|\| fake \| table \|/);
+  assert.match(comparisonReport, /&lt;img/);
+});
+
+test("full-secret text export separates values and includes handling context", function () {
+  const dashboard = createDashboard();
+  const text = dashboard.context.buildSecretExport({
+    url: "https://example.test/",
+    scanId: "scan-secrets"
+  }, ["Stripe: raw-one", "GitHub: raw-two"], "2026-08-27T12:00:00.000Z");
+  assert.match(text, /^VulnScan Full Secret Values/);
+  assert.match(text, /Handle this file securely/);
+  assert.match(text, /Values: 2/);
+  assert.match(text, /--- Value 1 of 2 ---\nStripe: raw-one/);
+  assert.match(text, /--- Value 2 of 2 ---\nGitHub: raw-two/);
 });
 
 test("opens a detailed investigation and persists its local workflow state", function () {

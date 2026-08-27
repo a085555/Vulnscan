@@ -11,11 +11,12 @@ test("manifest and visible version are consistent", function () {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   const releaseNotes = fs.readFileSync(path.join(root, "RELEASE_NOTES.md"), "utf8");
   const dashboard = fs.readFileSync(path.join(root, "dashboard.js"), "utf8");
-  assert.equal(manifest.version, "6.4.0");
+  assert.equal(manifest.version, "6.4.1");
   assert.equal(manifest.minimum_chrome_version, "102");
-  assert.match(readme, /v6\.4\.0/);
-  assert.match(releaseNotes, /Vulnscan v6\.4\.0/);
+  assert.match(readme, /v6\.4\.1/);
+  assert.match(releaseNotes, /Vulnscan v6\.4\.1/);
   assert.equal(packageJson.version, manifest.version);
+  assert.equal(manifest.permissions.includes("alarms"), true);
   assert.match(dashboard, /getManifest\(\)\.version/);
   assert.equal(manifest.action.default_popup, undefined);
   assert.equal(manifest.content_security_policy.extension_pages, "script-src 'self'; object-src 'self'");

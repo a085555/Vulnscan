@@ -11,6 +11,9 @@ const backgroundSource = fs.readFileSync(path.join(__dirname, "..", "background.
 
 function createWorker(shared) {
   const state = shared || { local: {}, session: {} };
+  state.alarms = state.alarms || {};
+  state.grantedOrigins = state.grantedOrigins || [];
+  state.removedOrigins = state.removedOrigins || [];
   const listeners = {};
   const chrome = {
     webRequest: {
@@ -20,10 +23,34 @@ function createWorker(shared) {
       onBeforeRedirect: { addListener: function (listener) { listeners.redirect = listener; } }
     },
     action: { onClicked: { addListener: function () {} } },
+    alarms: {
+      create: function (name, options) { state.alarms[name] = options; },
+      clear: function (name, callback) { delete state.alarms[name]; if (callback) callback(true); },
+      onAlarm: { addListener: function (listener) { listeners.alarm = listener; } }
+    },
+    permissions: {
+      getAll: function (callback) { callback({ origins: state.grantedOrigins.slice() }); },
+      contains: function (options, callback) {
+        callback((options.origins || []).every(function (origin) { return state.grantedOrigins.includes(origin); }));
+      },
+      remove: function (options, callback) {
+        if (state.permissionRemoveFailures > 0) {
+          state.permissionRemoveFailures--;
+          if (callback) callback(false);
+          return;
+        }
+        (options.origins || []).forEach(function (origin) {
+          state.grantedOrigins = state.grantedOrigins.filter(function (value) { return value !== origin; });
+          state.removedOrigins.push(origin);
+        });
+        if (callback) callback(true);
+      }
+    },
     runtime: {
       getURL: function (value) { return "chrome-extension://test/" + value; },
       onMessage: { addListener: function (listener) { listeners.message = listener; } },
       onInstalled: { addListener: function (listener) { listeners.installed = listener; } },
+      onStartup: { addListener: function (listener) { listeners.startup = listener; } },
       lastError: null
     },
     storage: {
@@ -55,7 +82,8 @@ function createWorker(shared) {
       create: async function () {},
       get: function () {},
       onRemoved: { addListener: function (listener) { listeners.removed = listener; } },
-      onReplaced: { addListener: function (listener) { listeners.replaced = listener; } }
+      onReplaced: { addListener: function (listener) { listeners.replaced = listener; } },
+      onUpdated: { addListener: function (listener) { listeners.updated = listener; } }
     },
     windows: { update: async function () {} }
   };
@@ -285,8 +313,9 @@ test("stores only redacted request-log fields in session storage", async functio
   assert.doesNotMatch(JSON.stringify(log), /raw|secret|body/);
 });
 
-test("clears cached headers at navigation and tab lifecycle boundaries", async function () {
-  const worker = createWorker();
+test("captures headers only for a one-refresh tab and origin lease", async function () {
+  const shared = { local: {}, session: {}, grantedOrigins: ["https://example.test/*"] };
+  const worker = createWorker(shared);
   worker.listeners.headers({
     tabId: 4,
     type: "main_frame",
@@ -295,16 +324,125 @@ test("clears cached headers at navigation and tab lifecycle boundaries", async f
     responseHeaders: [{ name: "set-cookie", value: "a=1" }, { name: "set-cookie", value: "b=2" }]
   });
   let captured = await worker.send({ type: "get_headers", tabId: 4 });
-  assert.equal(captured.headers.length, 2);
-  assert.equal(captured.headers[0].value, "a=[redacted]");
-  worker.listeners.beforeRequest({ tabId: 4, type: "main_frame" });
-  captured = await worker.send({ type: "get_headers", tabId: 4 });
   assert.equal(captured.statusCode, 0);
 
-  worker.listeners.headers({ tabId: 4, type: "main_frame", url: "https://example.test/", statusCode: 200, responseHeaders: [] });
-  worker.listeners.removed(4);
+  await worker.send({ type: "scan_begin", scanId: "scan-headers", tabId: 4, origin: "https://example.test" });
+  const retained = await worker.send({
+    type: "scan_end",
+    scanId: "scan-headers",
+    retainHeaderCapture: true,
+    tabId: 4,
+    url: "https://example.test/"
+  });
+  assert.equal(retained.siteAccessRetained, true);
+  worker.listeners.headers({
+    tabId: 9,
+    type: "main_frame",
+    url: "https://example.test/",
+    statusCode: 200,
+    responseHeaders: [{ name: "x-frame-options", value: "DENY" }]
+  });
+  assert.equal((await worker.send({ type: "get_headers", tabId: 9 })).statusCode, 0);
+
+  worker.listeners.headers({
+    tabId: 4,
+    type: "main_frame",
+    url: "https://example.test/",
+    statusCode: 302,
+    responseHeaders: [{ name: "location", value: "/home" }]
+  });
+  assert.equal((await worker.send({ type: "get_headers", tabId: 4 })).statusCode, 0);
+  worker.listeners.headers({
+    tabId: 4,
+    type: "main_frame",
+    url: "https://example.test/",
+    statusCode: 200,
+    responseHeaders: [{ name: "set-cookie", value: "a=1" }, { name: "set-cookie", value: "b=2" }]
+  });
   captured = await worker.send({ type: "get_headers", tabId: 4 });
-  assert.equal(captured.statusCode, 0);
+  assert.equal(captured.headers.length, 2);
+  assert.equal(captured.headers[0].value, "a=[redacted]");
+  assert.equal(captured.urlFingerprint, worker.model.key("https://example.test/"));
+
+  const restarted = createWorker(shared);
+  captured = await restarted.send({ type: "get_headers", tabId: 4 });
+  assert.equal(captured.headers.length, 2);
+  await restarted.send({ type: "scan_begin", scanId: "scan-consume", tabId: 4, origin: "https://example.test" });
+  const released = await restarted.send({ type: "scan_end", scanId: "scan-consume" });
+  assert.equal(released.siteAccessRetained, false);
+  assert.equal(shared.removedOrigins.includes("https://example.test/*"), true);
+});
+
+test("revokes a pending header lease on tab closure or expiry", async function () {
+  const closeState = { local: {}, session: {}, grantedOrigins: ["https://example.test/*"] };
+  const closeWorker = createWorker(closeState);
+  await closeWorker.send({ type: "scan_begin", scanId: "scan-close", tabId: 4, origin: "https://example.test" });
+  await closeWorker.send({ type: "scan_end", scanId: "scan-close", retainHeaderCapture: true, tabId: 4, url: "https://example.test/" });
+  closeWorker.listeners.removed(4);
+  assert.equal(closeState.removedOrigins.includes("https://example.test/*"), true);
+  assert.equal(closeState.session.headerCapture, undefined);
+
+  const expiryState = { local: {}, session: {}, grantedOrigins: ["https://expiry.test/*"] };
+  const expiryWorker = createWorker(expiryState);
+  await expiryWorker.send({ type: "scan_begin", scanId: "scan-expiry", tabId: 8, origin: "https://expiry.test" });
+  await expiryWorker.send({ type: "scan_end", scanId: "scan-expiry", retainHeaderCapture: true, tabId: 8, url: "https://expiry.test/" });
+  expiryWorker.listeners.alarm({ name: "vulnscan-site-access" });
+  assert.equal(expiryState.removedOrigins.includes("https://expiry.test/*"), true);
+  assert.equal(expiryState.session.headerCapture, undefined);
+});
+
+test("revokes a pending header lease when the target changes origin", async function () {
+  const state = { local: {}, session: {}, grantedOrigins: ["https://example.test/*"] };
+  const worker = createWorker(state);
+  await worker.send({ type: "scan_begin", scanId: "scan-nav", tabId: 4, origin: "https://example.test" });
+  await worker.send({ type: "scan_end", scanId: "scan-nav", retainHeaderCapture: true, tabId: 4, url: "https://example.test/" });
+  worker.listeners.updated(4, { url: "https://other.test/" });
+  assert.equal(state.removedOrigins.includes("https://example.test/*"), true);
+  assert.equal(state.session.headerCapture, undefined);
+});
+
+test("Clear all removes every granted site origin", async function () {
+  const state = {
+    local: {},
+    session: { headerCapture: { tabId: 4, origin: "https://example.test", originPattern: "https://example.test/*", state: "waiting", expiresAt: Date.now() + 60000 } },
+    grantedOrigins: ["https://example.test/*", "http://lab.test/*"]
+  };
+  const worker = createWorker(state);
+  const response = await worker.send({ type: "clear_all_session" });
+  assert.equal(response.siteAccessCleared, true);
+  assert.deepEqual(state.grantedOrigins, []);
+  assert.equal(state.session.headerCapture, undefined);
+});
+
+test("keeps an expiry retry when permission removal fails", async function () {
+  const state = {
+    local: {},
+    session: {},
+    grantedOrigins: ["https://example.test/*"],
+    permissionRemoveFailures: 1
+  };
+  const worker = createWorker(state);
+  await worker.send({ type: "scan_begin", scanId: "scan-retry", tabId: 4, origin: "https://example.test" });
+  const ended = await worker.send({ type: "scan_end", scanId: "scan-retry" });
+  assert.equal(ended.siteAccessReleased, false);
+  assert.equal(state.grantedOrigins.includes("https://example.test/*"), true);
+  assert.equal(!!state.session.scanContext, true);
+  assert.equal(!!state.alarms["vulnscan-site-access"], true);
+  worker.listeners.alarm({ name: "vulnscan-site-access" });
+  assert.equal(state.grantedOrigins.includes("https://example.test/*"), false);
+  assert.equal(state.session.scanContext, undefined);
+});
+
+test("browser startup revokes grants left after session state is discarded", function () {
+  const state = {
+    local: {},
+    session: {},
+    grantedOrigins: ["https://restart.test/*"]
+  };
+  const worker = createWorker(state);
+  worker.listeners.startup();
+  assert.deepEqual(state.grantedOrigins, []);
+  assert.equal(state.removedOrigins.includes("https://restart.test/*"), true);
 });
 
 test("scopes outgoing CORS evidence to the active scan and exact origin", async function () {

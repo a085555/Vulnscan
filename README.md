@@ -2,16 +2,15 @@
 
 Desktop browser security workspace for controlled passive and safe-active webpage checks.
 
-**Tool by a085** · v6.4.0
+**Tool by a085** · v6.4.1
 
-## What is new in v6.4
+## What is new in v6.4.1
 
-- Change map compares compatible scans across findings and observed surface nodes
-- New, changed, resolved, and unchanged branches make regressions and retest results visible
-- Collapsible map branches and a large-map overview navigator reduce clutter in dense assessments
-- Findings can be pinned to an investigation queue and tracked with local verification checklists
-- Local investigation notes stay on the device and are excluded from exports
-- Sanitized comparison Markdown and standalone SVG map exports support reporting without raw secrets
+- Markdown reports now encode page-controlled text so exported evidence cannot create headings, links, raw HTML, or other report structure
+- Reports use a compact assessment summary, clearer coverage, numbered finding sections, readable filenames, and a cleaner full-secret layout
+- Exact-origin site access is released after a scan unless one manual refresh is needed to capture response headers
+- Pending header capture is limited to the selected tab and origin, survives a worker restart, expires after 10 minutes, and is revoked at browser startup
+- Clear data and site access now removes saved scan data, session data, and every optional site grant
 
 ## Features
 
@@ -109,13 +108,15 @@ Vulnscan keeps redacted findings for the 12 most recent scans. Target matching u
 ## Data handling
 
 - Visible findings, evidence, history, copied text, Markdown, and JSON never include raw secret values.
+- Page-controlled text is encoded at the Markdown export boundary while JSON retains the original redacted evidence fields.
 - Raw values are kept in browser session storage, matched to the scan and target URL, and cleared on a new scan, Clear, extension reload/update, or browser exit.
 - Full values remain available after a scan through the separate **Full secret values** export, which requires an extra confirmation.
 - Request logs contain only the method, redacted URL, status, duration, and outcome for the current browser session.
 - Captured Set-Cookie values are replaced before header analysis; only names and attributes are assessed.
 - Workflow records contain the target fingerprint, finding identity, state, verification progress, queue membership, a bounded local note, and update time. Notes are not exported.
 - Scan health records whether source, DOM, finding, or secret collection reached a configured limit.
-- If response headers were not captured for the selected page load, refresh the target tab manually and scan again. Passive mode never reloads it.
+- Exact-origin site access is released after a completed scan. If response headers were not captured, access is retained only for the selected tab's next same-origin refresh, expires after 10 minutes, and is revoked when the browser restarts.
+- Refresh the target tab manually and scan again to use captured headers. Passive mode never reloads it. **Clear data and site access** revokes pending grants immediately.
 
 ## Browser support
 

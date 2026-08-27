@@ -1,36 +1,27 @@
-# Vulnscan v6.4.0
+# Vulnscan v6.4.1
 
-Vulnscan v6.4 adds scan-change intelligence and a more complete local investigation workflow. Scanner permissions, request behavior, safety limits, and secret handling are unchanged.
+Vulnscan v6.4.1 is a focused reporting and permission-lifecycle patch. Scan checks, request limits, finding classification, and saved-history compatibility are unchanged.
 
-## Change map
+## Safer, cleaner exports
 
-- Compatible scans can be viewed as new, changed, resolved, and unchanged branches.
-- Finding comparison uses stable identities and reports which evidence fields changed.
-- Observed surface nodes are compared when Passive completed in both scans.
-- The map respects comparable scan stages so incomplete coverage is not presented as a reliable resolution.
-- Change filters can isolate regressions, retest changes, or resolved results.
+- Markdown reports encode every dynamic value at the export boundary, including page-derived evidence, locations, URLs, and comparison text.
+- Raw HTML, headings, links, lists, tables, and code fences supplied by a scanned page remain inert report text.
+- Assessment reports now start with a compact summary and coverage section, followed by numbered Findings and Review entries.
+- JSON remains pretty-printed and keeps the original redacted evidence fields for integrations.
+- Export filenames include the target host, export type, and readable UTC timestamp.
+- Full-secret text exports include a handling warning, scan context, value count, and clearly separated values.
 
-## Large-map navigation
+## Site-access lifecycle
 
-- Surface groups, scan stages, and change groups can be collapsed and expanded from the details panel.
-- Reachability-aware collapsing keeps nodes visible when another open branch still connects to them.
-- Larger maps show a clickable overview navigator with the current viewport and selected node.
-- Existing evidence-path focus, keyboard navigation, stable hover behavior, and readable node centring remain available.
-
-## Investigation workflow
-
-- Findings can be pinned to a visible investigation queue.
-- Every investigation step has a local Pending, Complete, Failed, or Inconclusive state.
-- Bounded local notes can be stored against the target and stable finding identity.
-- Queue membership and verification progress are included in redacted JSON reports; notes remain local and are never exported.
-
-## Reporting
-
-- Comparison results can be exported as sanitized Markdown with current and previous timestamps, comparable stages, finding changes, and surface-change counts.
-- The visible map can be exported as a standalone sanitized SVG containing labels and relationships but no finding evidence or raw secret values.
-- The scan schema remains version 8, so compatible v6.2 and v6.3 history remains usable.
+- Exact-origin access is released when a scan completes, is cancelled, fails, or loses its selected target.
+- When response headers need a manual refresh, capture is limited to one selected tab and origin rather than every tab at a granted origin.
+- The pending header response is kept in browser session storage so a background-worker restart does not lose it.
+- Temporary access expires after 10 minutes and is also revoked when the browser restarts, the tab closes, is replaced, or navigates to another origin.
+- **Clear data and site access** removes local results, session data, and all optional site grants.
+- The `alarms` permission is used only to enforce the 10-minute site-access expiry.
 
 ## Compatibility
 
-- Chrome and Firefox packages continue to share the same scanner implementation.
-- No permissions, active checks, or package dependencies were added.
+- Chrome 102 or newer and Firefox 128 or newer remain supported from the same source.
+- The scan schema remains version 8 and the JSON report format remains 6.4, so v6.2–v6.4 history and report consumers remain compatible.
+- No active checks or package dependencies were added.

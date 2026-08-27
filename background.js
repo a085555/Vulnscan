@@ -2,7 +2,9 @@ if (typeof importScripts === "function") {
   importScripts("finding-model.js", "url-utils.js", "scan-checks.js");
 }
 
-const headerCache = {};
+let headerCache = {};
+let headerCacheLoaded = false;
+let headerCapture;
 let redirectCache = {};
 let currentScan = null;
 const vaultKey = "secretVault";
@@ -10,6 +12,10 @@ const requestLogKey = "requestLog";
 const scanContextKey = "scanContext";
 const redirectLogKey = "redirectLog";
 const corsProbeKey = "corsProbe";
+const headerCacheKey = "capturedHeaders";
+const headerCaptureKey = "headerCapture";
+const siteAccessAlarm = "vulnscan-site-access";
+const siteAccessLifetimeMs = 10 * 60 * 1000;
 
 function comparableUrl(value) {
   return VulnscanUrls.comparable(value);
@@ -106,7 +112,11 @@ function clearVault(callback) {
 }
 
 function clearSessionData(callback) {
-  chrome.storage.session.remove([vaultKey, requestLogKey, scanContextKey, redirectLogKey, corsProbeKey], function () {
+  headerCache = {};
+  headerCacheLoaded = true;
+  headerCapture = null;
+  if (chrome.alarms) chrome.alarms.clear(siteAccessAlarm, function () {});
+  chrome.storage.session.remove([vaultKey, requestLogKey, scanContextKey, redirectLogKey, corsProbeKey, headerCacheKey, headerCaptureKey], function () {
     if (callback) callback();
   });
 }
@@ -210,23 +220,254 @@ function cleanCapturedHeaders(headers) {
   }, []);
 }
 
+function originPattern(origin) {
+  return origin + "/*";
+}
+
+function cleanHeaderEntry(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    headers: cleanCapturedHeaders(source.headers),
+    url: redactUrl(source.url),
+    urlFingerprint: String(source.urlFingerprint || "").slice(0, 80),
+    statusCode: Math.max(0, Math.min(999, Number(source.statusCode) || 0)),
+    capturedAt: Math.max(0, Number(source.capturedAt) || 0)
+  };
+}
+
+function loadHeaderCache(callback) {
+  if (headerCacheLoaded) {
+    callback(headerCache);
+    return;
+  }
+  chrome.storage.session.get(headerCacheKey, function (data) {
+    const stored = data[headerCacheKey];
+    headerCache = {};
+    if (stored && typeof stored === "object") {
+      Object.keys(stored).slice(0, 200).forEach(function (tabId) {
+        if (/^\d+$/.test(tabId)) headerCache[tabId] = cleanHeaderEntry(stored[tabId]);
+      });
+    }
+    headerCacheLoaded = true;
+    callback(headerCache);
+  });
+}
+
+function saveHeaderCache() {
+  chrome.storage.session.set({ [headerCacheKey]: headerCache });
+}
+
+function removeHeaderEntry(tabId) {
+  loadHeaderCache(function () {
+    if (!Object.prototype.hasOwnProperty.call(headerCache, tabId)) return;
+    delete headerCache[tabId];
+    saveHeaderCache();
+  });
+}
+
+function cleanHeaderCapture(value) {
+  const source = value && typeof value === "object" ? value : {};
+  let origin = "";
+  try { origin = new URL(source.origin).origin; } catch (e) {}
+  if (!Number.isInteger(source.tabId) || !origin || origin !== source.origin || !["waiting", "ready"].includes(source.state)) return null;
+  return {
+    tabId: source.tabId,
+    origin: origin,
+    originPattern: originPattern(origin),
+    state: source.state,
+    expiresAt: Math.max(0, Number(source.expiresAt) || 0)
+  };
+}
+
+function loadHeaderCapture(callback) {
+  if (headerCapture !== undefined) {
+    callback(headerCapture);
+    return;
+  }
+  chrome.storage.session.get(headerCaptureKey, function (data) {
+    headerCapture = cleanHeaderCapture(data[headerCaptureKey]);
+    callback(headerCapture);
+  });
+}
+
+function scheduleSiteAccessExpiry(expiresAt) {
+  if (chrome.alarms) chrome.alarms.create(siteAccessAlarm, { when: expiresAt });
+}
+
+function clearHeaderCapture(callback) {
+  headerCapture = null;
+  if (chrome.alarms) chrome.alarms.clear(siteAccessAlarm, function () {});
+  chrome.storage.session.remove(headerCaptureKey, function () {
+    if (callback) callback();
+  });
+}
+
+function saveHeaderCapture(capture, callback) {
+  headerCapture = cleanHeaderCapture(capture);
+  if (!headerCapture) {
+    clearHeaderCapture(callback);
+    return;
+  }
+  chrome.storage.session.set({ [headerCaptureKey]: headerCapture }, function () {
+    scheduleSiteAccessExpiry(headerCapture.expiresAt);
+    if (callback) callback(headerCapture);
+  });
+}
+
+function removeOriginPermission(pattern, callback) {
+  if (!pattern || !chrome.permissions || !chrome.permissions.remove) {
+    if (callback) callback(false);
+    return;
+  }
+  let finished = false;
+  const complete = function (removed) {
+    if (finished) return;
+    if (chrome.runtime.lastError) {
+      finished = true;
+      if (callback) callback(false);
+      return;
+    }
+    if (removed !== false) {
+      finished = true;
+      if (callback) callback(true);
+      return;
+    }
+    if (!chrome.permissions.contains) {
+      finished = true;
+      if (callback) callback(false);
+      return;
+    }
+    finished = true;
+    chrome.permissions.contains({ origins: [pattern] }, function (granted) {
+      if (callback) callback(!chrome.runtime.lastError && !granted);
+    });
+  };
+  try {
+    const pending = chrome.permissions.remove({ origins: [pattern] }, complete);
+    if (pending && typeof pending.then === "function") pending.then(complete, function () { complete(false); });
+  } catch (error) {
+    complete(false);
+  }
+}
+
+function removeOriginPatterns(patterns, callback) {
+  const queue = Array.from(new Set((patterns || []).filter(Boolean)));
+  let removed = true;
+  function next() {
+    if (!queue.length) {
+      if (callback) callback(removed);
+      return;
+    }
+    removeOriginPermission(queue.shift(), function (result) {
+      removed = removed && result;
+      next();
+    });
+  }
+  next();
+}
+
+function removeAllSitePermissions(callback) {
+  if (!chrome.permissions || !chrome.permissions.getAll) {
+    if (callback) callback(false);
+    return;
+  }
+  chrome.permissions.getAll(function (granted) {
+    if (chrome.runtime.lastError) {
+      if (callback) callback(false);
+      return;
+    }
+    const origins = ((granted && granted.origins) || []).filter(function (value) {
+      return /^https?:\/\//.test(value);
+    });
+    if (!origins.length) {
+      if (callback) callback(true);
+      return;
+    }
+    chrome.permissions.remove({ origins: origins }, function (removed) {
+      if (callback) callback(!chrome.runtime.lastError && removed !== false);
+    });
+  });
+}
+
+function resetSiteAccess(callback) {
+  currentScan = null;
+  clearSessionData(function () {
+    removeAllSitePermissions(function (removed) {
+      if (!removed) scheduleSiteAccessExpiry(Date.now() + 60 * 1000);
+      if (callback) callback(removed);
+    });
+  });
+}
+
+function revokeHeaderCapture(callback) {
+  loadHeaderCapture(function (capture) {
+    if (!capture) {
+      clearHeaderCapture(function () { if (callback) callback(true); });
+      return;
+    }
+    removeOriginPermission(capture.originPattern, function (removed) {
+      if (!removed) {
+        scheduleSiteAccessExpiry(Date.now() + 60 * 1000);
+        if (callback) callback(false);
+        return;
+      }
+      removeHeaderEntry(capture.tabId);
+      clearHeaderCapture(function () {
+        if (callback) callback(true);
+      });
+    });
+  });
+}
+
+function revokeScanContext(scan, callback) {
+  if (!scan) {
+    if (callback) callback(true);
+    return;
+  }
+  removeOriginPermission(scan.originPattern || originPattern(scan.origin), function (removed) {
+    if (!removed) {
+      scheduleSiteAccessExpiry(Date.now() + 60 * 1000);
+      if (callback) callback(false);
+      return;
+    }
+    currentScan = null;
+    if (chrome.alarms) chrome.alarms.clear(siteAccessAlarm, function () {});
+    chrome.storage.session.remove(scanContextKey, function () {
+      if (callback) callback(true);
+    });
+  });
+}
+
 chrome.webRequest.onBeforeRequest.addListener(
   function (details) {
     if (details.tabId >= 0 && details.type === "main_frame") {
-      delete headerCache[details.tabId];
+      removeHeaderEntry(details.tabId);
     }
   },
   { urls: ["<all_urls>"], types: ["main_frame"] }
 );
 
 function captureResponseHeaders(details) {
-  if (details.tabId >= 0 && details.type === "main_frame") {
-    headerCache[details.tabId] = {
-      headers: cleanCapturedHeaders(details.responseHeaders),
-      url: details.url,
-      statusCode: details.statusCode
-    };
-  }
+  if (details.tabId < 0 || details.type !== "main_frame" || !details.url) return;
+  loadHeaderCapture(function (capture) {
+    if (!capture || capture.state !== "waiting" || capture.expiresAt <= Date.now() || capture.tabId !== details.tabId) return;
+    let responseOrigin = "";
+    try { responseOrigin = new URL(details.url).origin; } catch (e) {}
+    if (!responseOrigin || responseOrigin !== capture.origin) return;
+    const statusCode = Math.max(0, Number(details.statusCode) || 0);
+    if (statusCode >= 300 && statusCode < 400) return;
+    loadHeaderCache(function () {
+      headerCache[details.tabId] = cleanHeaderEntry({
+        headers: details.responseHeaders,
+        url: details.url,
+        urlFingerprint: exactUrlFingerprint(details.url),
+        statusCode: statusCode,
+        capturedAt: Date.now()
+      });
+      saveHeaderCache();
+      saveHeaderCapture(Object.assign({}, capture, { state: "ready" }));
+    });
+  });
 }
 
 try {
@@ -307,13 +548,63 @@ chrome.webRequest.onBeforeRedirect.addListener(
 );
 
 chrome.tabs.onRemoved.addListener(function (tabId) {
-  delete headerCache[tabId];
+  removeHeaderEntry(tabId);
+  loadHeaderCapture(function (capture) {
+    if (capture && capture.tabId === tabId) revokeHeaderCapture();
+  });
+  loadScanContext(function (scan) {
+    if (!scan || scan.tabId !== tabId) return;
+    revokeScanContext(scan);
+  });
 });
 
 if (chrome.tabs.onReplaced) {
   chrome.tabs.onReplaced.addListener(function (addedTabId, removedTabId) {
-    delete headerCache[removedTabId];
-    delete headerCache[addedTabId];
+    removeHeaderEntry(removedTabId);
+    removeHeaderEntry(addedTabId);
+    loadHeaderCapture(function (capture) {
+      if (capture && (capture.tabId === removedTabId || capture.tabId === addedTabId)) revokeHeaderCapture();
+    });
+    loadScanContext(function (scan) {
+      if (!scan || (scan.tabId !== removedTabId && scan.tabId !== addedTabId)) return;
+      revokeScanContext(scan);
+    });
+  });
+}
+
+if (chrome.tabs.onUpdated) {
+  chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
+    if (!changeInfo || !changeInfo.url) return;
+    let nextOrigin = "";
+    try { nextOrigin = new URL(changeInfo.url).origin; } catch (e) {}
+    loadHeaderCapture(function (capture) {
+      if (capture && capture.tabId === tabId && nextOrigin !== capture.origin) revokeHeaderCapture();
+    });
+    loadScanContext(function (scan) {
+      if (!scan || scan.tabId !== tabId || nextOrigin === scan.origin) return;
+      revokeScanContext(scan);
+    });
+  });
+}
+
+if (chrome.alarms) {
+  chrome.alarms.onAlarm.addListener(function (alarm) {
+    if (!alarm || alarm.name !== siteAccessAlarm) return;
+    loadHeaderCapture(function (capture) {
+      if (capture) {
+        revokeHeaderCapture();
+        return;
+      }
+      loadScanContext(function (scan) {
+        if (scan) {
+          revokeScanContext(scan);
+          return;
+        }
+        removeAllSitePermissions(function (removed) {
+          if (!removed) scheduleSiteAccessExpiry(Date.now() + 60 * 1000);
+        });
+      });
+    });
   });
 }
 
@@ -330,7 +621,7 @@ chrome.action.onClicked.addListener(function () {
 });
 
 chrome.runtime.onInstalled.addListener(function () {
-  clearSessionData();
+  resetSiteAccess();
   chrome.storage.local.get(["lastScan", "scanHistory"], function (data) {
     const migrated = migrateScan(data.lastScan);
     if (migrated) chrome.storage.local.set({ lastScan: migrated });
@@ -372,6 +663,12 @@ chrome.runtime.onInstalled.addListener(function () {
     }
   });
 });
+
+if (chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(function () {
+    resetSiteAccess();
+  });
+}
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (!message || typeof message !== "object" || typeof message.type !== "string" || message.type.length > 80) {
@@ -483,8 +780,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === "clear_all_session") {
-    currentScan = null;
-    clearSessionData(function () { sendResponse({ ok: true }); });
+    resetSiteAccess(function (removed) { sendResponse({ ok: true, siteAccessCleared: removed }); });
     return true;
   }
 
@@ -495,30 +791,82 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       sendResponse({ error: "Invalid scan context" });
       return true;
     }
-    currentScan = {
-      id: message.scanId,
-      tabId: message.tabId,
-      origin: origin
-    };
-    redirectCache = {};
-    clearSessionData(function () {
-      chrome.storage.session.set({ [scanContextKey]: currentScan }, function () {
-        sendResponse({ ok: true, scanId: currentScan.id });
+    const nextPattern = originPattern(origin);
+    loadScanContext(function (previousScan) {
+      loadHeaderCapture(function (previousCapture) {
+        const previousPatterns = [];
+        if (previousScan) {
+          const pattern = previousScan.originPattern || originPattern(previousScan.origin);
+          if (pattern !== nextPattern) previousPatterns.push(pattern);
+        }
+        if (previousCapture && previousCapture.originPattern !== nextPattern) previousPatterns.push(previousCapture.originPattern);
+        removeOriginPatterns(previousPatterns, function (released) {
+          if (!released) {
+            sendResponse({ error: "Could not release previous site access" });
+            return;
+          }
+          redirectCache = {};
+          clearSessionData(function () {
+            currentScan = {
+              id: message.scanId,
+              tabId: message.tabId,
+              origin: origin,
+              originPattern: nextPattern
+            };
+            chrome.storage.session.set({ [scanContextKey]: currentScan }, function () {
+              scheduleSiteAccessExpiry(Date.now() + siteAccessLifetimeMs);
+              sendResponse({ ok: true, scanId: currentScan.id });
+            });
+          });
+        });
       });
     });
     return true;
   }
 
   if (message.type === "scan_end") {
-    if (!message.scanId || (currentScan && currentScan.id === message.scanId)) {
-      currentScan = null;
-    }
-    chrome.storage.session.remove(scanContextKey, function () { sendResponse({ ok: true }); });
+    loadScanContext(function (scan) {
+      if (!scan || !message.scanId || scan.id !== message.scanId) {
+        sendResponse({ error: "Scan context mismatch" });
+        return;
+      }
+      if (message.retainHeaderCapture === true && message.tabId === scan.tabId) {
+        let targetOrigin = "";
+        try { targetOrigin = new URL(message.url).origin; } catch (e) {}
+        if (targetOrigin !== scan.origin) {
+          revokeScanContext(scan, function () { sendResponse({ error: "Header capture target mismatch" }); });
+          return;
+        }
+        currentScan = null;
+        chrome.storage.session.remove(scanContextKey, function () {
+          saveHeaderCapture({
+            tabId: scan.tabId,
+            origin: scan.origin,
+            state: "waiting",
+            expiresAt: Date.now() + siteAccessLifetimeMs
+          }, function () {
+            sendResponse({ ok: true, siteAccessRetained: true });
+          });
+        });
+        return;
+      }
+      revokeScanContext(scan, function (removed) {
+        sendResponse({ ok: true, siteAccessRetained: false, siteAccessReleased: removed });
+      });
+    });
     return true;
   }
 
   if (message.type === "get_headers") {
-    sendResponse(headerCache[message.tabId] || { headers: [], url: "", statusCode: 0 });
+    loadHeaderCache(function () {
+      const captured = headerCache[message.tabId];
+      if (captured && captured.capturedAt && Date.now() - captured.capturedAt <= siteAccessLifetimeMs) {
+        sendResponse(captured);
+        return;
+      }
+      if (captured) removeHeaderEntry(message.tabId);
+      sendResponse({ headers: [], url: "", urlFingerprint: "", statusCode: 0, capturedAt: 0 });
+    });
     return true;
   }
 

@@ -275,7 +275,7 @@
         <div class="panel about-panel">
           <div class="panel-head"><span>ABOUT</span></div>
           <div class="panel-body about-body">
-            <p><strong>Vulnscan Security Workspace</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v6.4.0</strong>.</p>
+            <p><strong>Vulnscan Security Workspace</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v6.4.1</strong>.</p>
             <ul>
               <li><strong>Passive</strong> inspects the loaded page without sending scanner-generated requests.</li>
               <li><strong>Safe Active</strong> allows same-origin GET, HEAD, and OPTIONS checks within a request budget.</li>
@@ -288,10 +288,10 @@
               <li><strong>Guided exploitability</strong> explains prerequisites, safe validation, and evidence that may disprove a finding.</li>
               <li><strong>Cross-browser builds</strong> support desktop Chrome and Firefox from the same source.</li>
             </ul>
-            <p class="muted">Site access is requested for the exact selected origin so the extension can inspect that tab. Scan reports and history are stored locally. Raw secret values stay in browser session memory and only leave it through the separate full-secret export.</p>
+            <p class="muted">Site access is requested for the exact selected origin and released when the scan finishes. If response headers need a manual refresh, access is limited to the selected tab and expires after 10 minutes. Scan reports and history are stored locally. Raw secret values stay in browser session memory and only leave it through the separate full-secret export.</p>
             <div class="about-actions">
               <a class="btn ghost link-btn" href="https://github.com/a085555/Vulnscan/releases/latest" target="_blank" rel="noreferrer">Check for updates</a>
-              <button id="clearAllDataBtn" class="btn danger">Clear all data</button>
+              <button id="clearAllDataBtn" class="btn danger">Clear data and site access</button>
             </div>
             <p class="muted">Use only on targets you own or have permission to test.</p>
             <p class="credit">tool by a085</p>
