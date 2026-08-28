@@ -1,27 +1,37 @@
-# Vulnscan v6.4.1
+# Vulnscan v6.5.0
 
-Vulnscan v6.4.1 is a focused reporting and permission-lifecycle patch. Scan checks, request limits, finding classification, and saved-history compatibility are unchanged.
+Vulnscan v6.5.0 adds Journey Capture: a passive workspace for following one authorized browser tab through a same-origin testing session.
 
-## Safer, cleaner exports
+## Journey Capture
 
-- Markdown reports encode every dynamic value at the export boundary, including page-derived evidence, locations, URLs, and comparison text.
-- Raw HTML, headings, links, lists, tables, and code fences supplied by a scanned page remain inert report text.
-- Assessment reports now start with a compact summary and coverage section, followed by numbered Findings and Review entries.
-- JSON remains pretty-printed and keeps the original redacted evidence fields for integrations.
-- Export filenames include the target host, export type, and readable UTC timestamp.
-- Full-secret text exports include a handling warning, scan context, value count, and clearly separated values.
+- Records the initial page, completed navigations, and debounced single-page application route changes for up to 30 minutes.
+- Groups revisits under redacted route templates while keeping visit counts and first- and last-seen times.
+- Reuses the existing passive page and response-header checks on each captured route.
+- Observes same-origin fetch and XHR metadata without collecting bodies, form values, cookies, authorization data, or API header values.
+- Continues while the dashboard is closed and restores the live draft after a background-worker restart.
+- Saves a partial journey when the selected tab closes, is replaced, leaves the origin, or reaches the time limit.
+- Retains up to six redacted completed journeys with rename and delete controls.
 
-## Site-access lifecycle
+## Live Capture Console
 
-- Exact-origin access is released when a scan completes, is cancelled, fails, or loses its selected target.
-- When response headers need a manual refresh, capture is limited to one selected tab and origin rather than every tab at a granted origin.
-- The pending header response is kept in browser session storage so a background-worker restart does not lose it.
-- Temporary access expires after 10 minutes and is also revoked when the browser restarts, the tab closes, is replaced, or navigates to another origin.
-- **Clear data and site access** removes local results, session data, and all optional site grants.
-- The `alarms` permission is used only to enforce the 10-minute site-access expiry.
+- Adds a resizable DevTools-style console with ordered session, navigation, page, API, finding, coverage, and error events.
+- Supports category filters, text search, wrapping, collapse, full-height view, paused rendering, and follow-at-bottom behavior.
+- Assigns event sequence numbers in the background process so overlapping request completions cannot reorder the timeline.
+- Stops retaining event rows at 1,000 and reports the coverage limit while continuing aggregate page, API, and finding collection.
+- Links console events to the Journey Flow and Surface maps; selecting a map node can filter the console back to related evidence.
 
-## Compatibility
+## Privacy and exports
 
-- Chrome 102 or newer and Firefox 128 or newer remain supported from the same source.
-- The scan schema remains version 8 and the JSON report format remains 6.4, so v6.2–v6.4 history and report consumers remain compatible.
-- No active checks or package dependencies were added.
+- Removes credentials and fragments from captured URLs, redacts query values, and templates numeric, UUID, and opaque path segments before storage.
+- Stores live drafts, in-flight request metadata, capture state, and raw secrets in browser session storage only.
+- Saves only finalized redacted journeys to local history and releases exact-origin access on every terminal condition.
+- Adds redacted journey Markdown, JSON, and capture-log exports. Journey JSON uses `reportVersion: "6.5"`, `reportType: "journey"`, and `journeySchemaVersion: 1`.
+- Standard scan reports advance to report version 6.5 while keeping scan schema version 8 and v6.4.1 history compatibility.
+- Full secret values remain available only for the latest matching journey in the current browser session and still require confirmation.
+
+## Limits and compatibility
+
+- One selected top-level tab and one exact scheme, host, and port per journey.
+- Limits: 25 route templates, 200 API endpoints, 250 grouped findings, 600 surface nodes, 1,000 console events, and the existing 100-value secret vault.
+- Chrome 102 or newer and Firefox 128 or newer remain supported from the same source with no package dependencies.
+- Journey Capture is passive and does not crawl, schedule scans, run active checks, or generate network requests.

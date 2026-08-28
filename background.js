@@ -1,5 +1,5 @@
 if (typeof importScripts === "function") {
-  importScripts("finding-model.js", "url-utils.js", "scan-checks.js");
+  importScripts("finding-model.js", "url-utils.js", "scan-checks.js", "journey-model.js", "header-analysis.js");
 }
 
 let headerCache = {};
@@ -7,6 +7,14 @@ let headerCacheLoaded = false;
 let headerCapture;
 let redirectCache = {};
 let currentScan = null;
+let currentJourney = null;
+let journeyLoading = false;
+let journeyLoadCallbacks = [];
+let journeySaveTimer = null;
+let journeyCaptureTimers = {};
+let journeyInflight = null;
+let journeyInflightBusy = false;
+let journeyInflightOperations = [];
 const vaultKey = "secretVault";
 const requestLogKey = "requestLog";
 const scanContextKey = "scanContext";
@@ -14,6 +22,10 @@ const redirectLogKey = "redirectLog";
 const corsProbeKey = "corsProbe";
 const headerCacheKey = "capturedHeaders";
 const headerCaptureKey = "headerCapture";
+const journeyDraftKey = "journeyDraft";
+const journeyCapturesKey = "journeyCaptures";
+const journeyHeadersKey = "journeyHeaders";
+const journeyInflightKey = "journeyInflight";
 const siteAccessAlarm = "vulnscan-site-access";
 const siteAccessLifetimeMs = 10 * 60 * 1000;
 
@@ -115,8 +127,16 @@ function clearSessionData(callback) {
   headerCache = {};
   headerCacheLoaded = true;
   headerCapture = null;
+  currentJourney = null;
+  journeyInflight = null;
+  journeyInflightOperations = [];
+  Object.keys(journeyCaptureTimers).forEach(function (tabId) { clearTimeout(journeyCaptureTimers[tabId]); });
+  journeyCaptureTimers = {};
   if (chrome.alarms) chrome.alarms.clear(siteAccessAlarm, function () {});
-  chrome.storage.session.remove([vaultKey, requestLogKey, scanContextKey, redirectLogKey, corsProbeKey, headerCacheKey, headerCaptureKey], function () {
+  chrome.storage.session.remove([
+    vaultKey, requestLogKey, scanContextKey, redirectLogKey, corsProbeKey, headerCacheKey, headerCaptureKey,
+    journeyDraftKey, journeyCapturesKey, journeyHeadersKey, journeyInflightKey
+  ], function () {
     if (callback) callback();
   });
 }
@@ -130,6 +150,325 @@ function loadScanContext(callback) {
     const stored = data[scanContextKey];
     if (stored && stored.id && Number.isInteger(stored.tabId) && stored.origin) currentScan = stored;
     callback(currentScan);
+  });
+}
+
+function loadJourney(callback) {
+  if (currentJourney) {
+    callback(currentJourney);
+    return;
+  }
+  journeyLoadCallbacks.push(callback);
+  if (journeyLoading) return;
+  journeyLoading = true;
+  chrome.storage.session.get(journeyDraftKey, function (data) {
+    currentJourney = VulnscanJourneys.normalize(data[journeyDraftKey]);
+    const ready = function () {
+      journeyLoading = false;
+      const callbacks = journeyLoadCallbacks.slice();
+      journeyLoadCallbacks = [];
+      callbacks.forEach(function (waiting) { waiting(currentJourney); });
+    };
+    if (currentJourney && currentJourney.status === "recording") {
+      const restored = VulnscanJourneys.appendEvent(currentJourney, { kind: "session", phase: "restored", level: "info", details: { reason: "service-worker-restored" } });
+      chrome.storage.session.set({ [journeyDraftKey]: currentJourney }, function () {
+        if (restored) broadcastJourney({ type: "journey_event", journeyId: currentJourney.journeyId, event: restored });
+        ready();
+      });
+    } else ready();
+  });
+}
+
+function updateJourneyInflight(mutator, callback) {
+  journeyInflightOperations.push({ mutator: mutator, callback: callback });
+  if (journeyInflightBusy) return;
+  journeyInflightBusy = true;
+  const drain = function () {
+    const operation = journeyInflightOperations.shift();
+    if (!operation) {
+      journeyInflightBusy = false;
+      return;
+    }
+    const result = operation.mutator(journeyInflight);
+    chrome.storage.session.set({ [journeyInflightKey]: journeyInflight }, function () {
+      if (operation.callback) operation.callback(result);
+      drain();
+    });
+  };
+  if (journeyInflight) drain();
+  else chrome.storage.session.get(journeyInflightKey, function (data) {
+    journeyInflight = data[journeyInflightKey] && typeof data[journeyInflightKey] === "object" ? data[journeyInflightKey] : {};
+    drain();
+  });
+}
+
+function broadcastJourney(message) {
+  if (!chrome.runtime || typeof chrome.runtime.sendMessage !== "function") return;
+  try {
+    const pending = chrome.runtime.sendMessage(message, function () {});
+    if (pending && typeof pending.catch === "function") pending.catch(function () {});
+  } catch (e) {}
+}
+
+function persistJourney(journey, callback) {
+  const cleaned = VulnscanJourneys.normalize(journey);
+  if (!cleaned) {
+    if (callback) callback(false);
+    return;
+  }
+  currentJourney = cleaned;
+  chrome.storage.session.set({ [journeyDraftKey]: cleaned }, function () {
+    if (callback) callback(!chrome.runtime.lastError);
+  });
+}
+
+function queueJourneySave(journey) {
+  currentJourney = journey;
+  if (journeySaveTimer) return;
+  journeySaveTimer = setTimeout(function () {
+    journeySaveTimer = null;
+    if (currentJourney && currentJourney.status === "recording") persistJourney(currentJourney);
+  }, 200);
+}
+
+function appendJourneyEvent(journey, value) {
+  const item = VulnscanJourneys.appendEvent(journey, value);
+  if (item) broadcastJourney({ type: "journey_event", journeyId: journey.journeyId, event: item });
+  queueJourneySave(journey);
+  return item;
+}
+
+function validJourneySender(message, sender, journey) {
+  if (!journey || journey.status !== "recording" || !sender || !sender.tab || sender.tab.id !== journey.tabId) return false;
+  if (!message.journeyId || message.journeyId !== journey.journeyId || !message.captureId) return false;
+  try {
+    return new URL(sender.url || "").origin === journey.origin && comparableUrl(sender.url) === comparableUrl(message.url);
+  } catch (e) {
+    return false;
+  }
+}
+
+function journeyScripts(details, callback) {
+  let finished = false;
+  const done = function (result) {
+    if (finished) return;
+    finished = true;
+    if (callback) callback(result, chrome.runtime.lastError || null);
+  };
+  try {
+    const pending = chrome.scripting.executeScript(details, done);
+    if (pending && typeof pending.then === "function") pending.then(done, function (error) { done(null, error); });
+  } catch (error) {
+    done(null, error);
+  }
+}
+
+function runJourneyCapture(journey, tab, requestedUrl) {
+  if (!journey || journey.status !== "recording" || !tab || tab.id !== journey.tabId || !tab.url) return;
+  let origin = "";
+  try { origin = new URL(tab.url).origin; } catch (e) {}
+  if (origin !== journey.origin || (requestedUrl && VulnscanJourneys.route(tab.url) !== VulnscanJourneys.route(requestedUrl))) return;
+  const captureId = "c" + Date.now() + "-" + Math.random().toString(16).slice(2, 10);
+  const nextRef = VulnscanJourneys.routeId(VulnscanJourneys.route(tab.url));
+  const beforeNavigation = journey.nextSequence;
+  const page = VulnscanJourneys.noteNavigation(journey, {
+    url: tab.url,
+    title: tab.title || "",
+    timestamp: Date.now(),
+    countVisit: journey.currentPageRef !== nextRef,
+    phase: "complete"
+  });
+  if (!page) return;
+  const navigationEvent = journey.events[journey.events.length - 1];
+  if (journey.nextSequence > beforeNavigation && navigationEvent) broadcastJourney({ type: "journey_event", journeyId: journey.journeyId, event: navigationEvent });
+  appendJourneyEvent(journey, { kind: "page", phase: "start", level: "info", pageRef: page.id, route: page.route });
+  chrome.storage.session.get(journeyCapturesKey, function (data) {
+    const captures = data[journeyCapturesKey] && typeof data[journeyCapturesKey] === "object" ? data[journeyCapturesKey] : {};
+    captures[captureId] = { journeyId: journey.journeyId, tabId: journey.tabId, urlFingerprint: exactUrlFingerprint(tab.url), createdAt: Date.now() };
+    Object.keys(captures).forEach(function (id) {
+      if (Date.now() - Number(captures[id].createdAt || 0) > 60 * 1000) delete captures[id];
+    });
+    chrome.storage.session.set({ [journeyCapturesKey]: captures }, function () {
+      journeyScripts({
+        target: { tabId: journey.tabId },
+        func: function (journeyId, pageCaptureId, enabledChecks) {
+          globalThis.__vulnscanJourneyId = journeyId;
+          globalThis.__vulnscanCaptureId = pageCaptureId;
+          globalThis.__vulnscanScanId = journeyId;
+          globalThis.__vulnscanScanMode = "passive";
+          globalThis.__vulnscanEnabledChecks = enabledChecks;
+        },
+        args: [journey.journeyId, captureId, VulnscanChecks.effective(VulnscanChecks.all(), "passive")]
+      }, function (result, setupError) {
+        if (setupError) {
+          appendJourneyEvent(journey, { kind: "error", phase: "error", level: "error", pageRef: page.id, route: page.route, details: { reason: "page-capture-setup-failed" } });
+          return;
+        }
+        journeyScripts({ target: { tabId: journey.tabId }, files: ["finding-model.js", "url-utils.js", "scan-checks.js", "content.js"] }, function (injected, captureError) {
+          if (captureError) appendJourneyEvent(journey, { kind: "error", phase: "error", level: "error", pageRef: page.id, route: page.route, details: { reason: "page-capture-failed" } });
+        });
+      });
+    });
+  });
+}
+
+function scheduleJourneyCapture(tabId, url, delay) {
+  if (journeyCaptureTimers[tabId]) clearTimeout(journeyCaptureTimers[tabId]);
+  journeyCaptureTimers[tabId] = setTimeout(function () {
+    delete journeyCaptureTimers[tabId];
+    loadJourney(function (journey) {
+      if (!journey || journey.tabId !== tabId || journey.status !== "recording") return;
+      chrome.tabs.get(tabId, function (tab) {
+        if (chrome.runtime.lastError || !tab) return;
+        runJourneyCapture(journey, tab, url);
+      });
+    });
+  }, Math.max(0, Number(delay) || 0));
+}
+
+function clearJourneySession(keepVault, callback) {
+  if (journeySaveTimer) clearTimeout(journeySaveTimer);
+  journeySaveTimer = null;
+  Object.keys(journeyCaptureTimers).forEach(function (tabId) { clearTimeout(journeyCaptureTimers[tabId]); });
+  journeyCaptureTimers = {};
+  journeyInflight = null;
+  journeyInflightOperations = [];
+  const keys = [journeyDraftKey, journeyCapturesKey, journeyHeadersKey, journeyInflightKey];
+  if (!keepVault) keys.push(vaultKey);
+  chrome.storage.session.remove(keys, function () { if (callback) callback(); });
+}
+
+function saveJourneyHistory(journey, callback) {
+  chrome.storage.local.get("journeyHistory", function (data) {
+    const history = (Array.isArray(data.journeyHistory) ? data.journeyHistory : []).map(VulnscanJourneys.normalize).filter(Boolean);
+    const next = [journey].concat(history.filter(function (entry) { return entry.journeyId !== journey.journeyId; })).slice(0, 6);
+    chrome.storage.local.set({ journeyHistory: next }, function () { if (callback) callback(); });
+  });
+}
+
+function finishJourney(reason, discard, callback) {
+  loadJourney(function (journey) {
+    if (!journey) {
+      if (callback) callback({ error: "No active journey" });
+      return;
+    }
+    appendJourneyEvent(journey, { kind: "session", phase: "stopped", level: reason === "finished" ? "success" : "warning", details: { reason: reason } });
+    const completed = VulnscanJourneys.normalize(VulnscanJourneys.finalize(journey, reason, Date.now()));
+    const save = !!(!discard && completed && completed.pages.length);
+    const afterSave = function () {
+      const pattern = originPattern(journey.origin);
+      currentJourney = null;
+      clearJourneySession(save, function () {
+        removeOriginPermission(pattern, function (removed) {
+          if (!removed) scheduleSiteAccessExpiry(Date.now() + 60 * 1000);
+          else if (chrome.alarms) chrome.alarms.clear(siteAccessAlarm, function () {});
+          broadcastJourney({ type: "journey_state_changed", state: save ? "complete" : "discarded", journey: save ? completed : null });
+          if (callback) callback({ ok: true, saved: save, siteAccessReleased: removed, journey: save ? completed : null });
+        });
+      });
+    };
+    if (save) saveJourneyHistory(completed, afterSave);
+    else afterSave();
+  });
+}
+
+function journeyRequestStarted(details) {
+  if (!details || details.tabId < 0 || !details.url || !["main_frame", "xmlhttprequest"].includes(details.type)) return;
+  loadJourney(function (journey) {
+    if (!journey || journey.status !== "recording" || details.tabId !== journey.tabId) return;
+    let requestOrigin = "";
+    try { requestOrigin = new URL(details.url).origin; } catch (e) {}
+    if (requestOrigin !== journey.origin) return;
+    const timestamp = Math.max(0, Number(details.timeStamp) || Date.now());
+    if (details.type === "main_frame") {
+      const beforeNavigation = journey.nextSequence;
+      VulnscanJourneys.noteNavigation(journey, { url: details.url, timestamp: timestamp, phase: "start", method: details.method || "GET" });
+      const navigationEvent = journey.events[journey.events.length - 1];
+      if (journey.nextSequence > beforeNavigation && navigationEvent) broadcastJourney({ type: "journey_event", journeyId: journey.journeyId, event: navigationEvent });
+      queueJourneySave(journey);
+      return;
+    }
+    const sanitized = VulnscanJourneys.route(details.url);
+    const method = /^[A-Z]{1,12}$/.test(String(details.method || "").toUpperCase()) ? String(details.method).toUpperCase() : "OTHER";
+    const endpointRef = VulnscanJourneys.endpointId(method, sanitized);
+    appendJourneyEvent(journey, {
+      kind: "api", phase: "start", level: "info", timestamp: timestamp, pageRef: journey.currentPageRef,
+      endpointRef: endpointRef, method: method, route: sanitized, outcome: "started"
+    });
+    const requestId = textRequestId(details.requestId);
+    if (!requestId) return;
+    updateJourneyInflight(function (inflight) {
+      inflight[requestId] = {
+        journeyId: journey.journeyId,
+        url: sanitized,
+        method: method,
+        pageRef: journey.currentPageRef,
+        startedAt: timestamp
+      };
+      Object.keys(inflight).slice(500).forEach(function (id) { delete inflight[id]; });
+      return true;
+    });
+  });
+}
+
+function textRequestId(value) {
+  return String(value === undefined || value === null ? "" : value).slice(0, 120);
+}
+
+function journeyRequestFinished(details, outcome, phase) {
+  if (!details || details.tabId < 0 || details.type !== "xmlhttprequest") return;
+  const requestId = textRequestId(details.requestId);
+  if (!requestId) return;
+  loadJourney(function (activeJourney) {
+    if (!activeJourney || activeJourney.status !== "recording" || details.tabId !== activeJourney.tabId) return;
+    updateJourneyInflight(function (inflight) {
+      const pending = inflight[requestId];
+      if (!pending) return null;
+      delete inflight[requestId];
+      return pending;
+    }, function (pending) {
+      if (!pending) return;
+      loadJourney(function (journey) {
+      if (!journey || journey.journeyId !== pending.journeyId || details.tabId !== journey.tabId) return;
+      const timestamp = Math.max(0, Number(details.timeStamp) || Date.now());
+      const beforeApiEvent = journey.nextSequence;
+      VulnscanJourneys.recordApi(journey, {
+        url: pending.url,
+        method: pending.method,
+        pageRef: pending.pageRef,
+        status: details.statusCode,
+        durationMs: Math.max(0, timestamp - pending.startedAt),
+        timestamp: timestamp,
+        outcome: outcome,
+        phase: phase
+      });
+      const latest = journey.events[journey.events.length - 1];
+      if (journey.nextSequence > beforeApiEvent && latest) broadcastJourney({ type: "journey_event", journeyId: journey.journeyId, event: latest });
+      queueJourneySave(journey);
+      broadcastJourney({ type: "journey_state_changed", state: "recording", journey: VulnscanJourneys.normalize(journey) });
+      });
+    });
+  });
+}
+
+function captureJourneyHeaders(details) {
+  if (!details || details.tabId < 0 || details.type !== "main_frame" || !details.url) return;
+  loadJourney(function (journey) {
+    if (!journey || journey.status !== "recording" || details.tabId !== journey.tabId) return;
+    if (VulnscanUrls.origin(details.url) !== journey.origin) return;
+    const pageRef = VulnscanJourneys.routeId(VulnscanJourneys.route(details.url));
+    chrome.storage.session.get(journeyHeadersKey, function (data) {
+      const stored = data[journeyHeadersKey] && typeof data[journeyHeadersKey] === "object" ? data[journeyHeadersKey] : {};
+      stored[pageRef] = {
+        journeyId: journey.journeyId,
+        url: VulnscanJourneys.route(details.url),
+        statusCode: Math.max(0, Math.min(999, Number(details.statusCode) || 0)),
+        headers: cleanCapturedHeaders(details.responseHeaders),
+        capturedAt: Date.now()
+      };
+      Object.keys(stored).slice(VulnscanJourneys.limits.pages).forEach(function (id) { delete stored[id]; });
+      chrome.storage.session.set({ [journeyHeadersKey]: stored });
+    });
   });
 }
 
@@ -443,12 +782,14 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (details.tabId >= 0 && details.type === "main_frame") {
       removeHeaderEntry(details.tabId);
     }
+    journeyRequestStarted(details);
   },
-  { urls: ["<all_urls>"], types: ["main_frame"] }
+  { urls: ["<all_urls>"], types: ["main_frame", "xmlhttprequest"] }
 );
 
 function captureResponseHeaders(details) {
   if (details.tabId < 0 || details.type !== "main_frame" || !details.url) return;
+  captureJourneyHeaders(details);
   loadHeaderCapture(function (capture) {
     if (!capture || capture.state !== "waiting" || capture.expiresAt <= Date.now() || capture.tabId !== details.tabId) return;
     let responseOrigin = "";
@@ -481,6 +822,20 @@ try {
     captureResponseHeaders,
     { urls: ["<all_urls>"], types: ["main_frame"] },
     ["responseHeaders"]
+  );
+}
+
+if (chrome.webRequest.onCompleted) {
+  chrome.webRequest.onCompleted.addListener(
+    function (details) { journeyRequestFinished(details, "complete", "complete"); },
+    { urls: ["<all_urls>"], types: ["xmlhttprequest"] }
+  );
+}
+
+if (chrome.webRequest.onErrorOccurred) {
+  chrome.webRequest.onErrorOccurred.addListener(
+    function (details) { journeyRequestFinished(details, "error", "error"); },
+    { urls: ["<all_urls>"], types: ["xmlhttprequest"] }
   );
 }
 
@@ -526,6 +881,20 @@ if (chrome.webRequest.onBeforeSendHeaders) {
 chrome.webRequest.onBeforeRedirect.addListener(
   function (details) {
     if (!details.url || !details.redirectUrl) return;
+    if (details.type === "xmlhttprequest") journeyRequestFinished(details, "redirect", "redirect");
+    if (details.type === "main_frame") {
+      loadJourney(function (journey) {
+        if (!journey || journey.status !== "recording" || details.tabId !== journey.tabId || VulnscanUrls.origin(details.url) !== journey.origin) return;
+        const targetOrigin = VulnscanUrls.origin(details.redirectUrl);
+        appendJourneyEvent(journey, {
+          kind: "navigation", phase: "redirect", level: targetOrigin === journey.origin ? "info" : "warning",
+          timestamp: details.timeStamp, pageRef: journey.currentPageRef,
+          route: targetOrigin === journey.origin ? VulnscanJourneys.route(details.redirectUrl) : targetOrigin,
+          status: details.statusCode,
+          details: { reason: targetOrigin === journey.origin ? "same-origin-redirect" : "redirect-left-origin" }
+        });
+      });
+    }
     loadScanContext(function (scan) {
       if (!scan) return;
       try {
@@ -549,6 +918,9 @@ chrome.webRequest.onBeforeRedirect.addListener(
 
 chrome.tabs.onRemoved.addListener(function (tabId) {
   removeHeaderEntry(tabId);
+  loadJourney(function (journey) {
+    if (journey && journey.tabId === tabId) finishJourney("tab-closed", false);
+  });
   loadHeaderCapture(function (capture) {
     if (capture && capture.tabId === tabId) revokeHeaderCapture();
   });
@@ -562,6 +934,9 @@ if (chrome.tabs.onReplaced) {
   chrome.tabs.onReplaced.addListener(function (addedTabId, removedTabId) {
     removeHeaderEntry(removedTabId);
     removeHeaderEntry(addedTabId);
+    loadJourney(function (journey) {
+      if (journey && (journey.tabId === removedTabId || journey.tabId === addedTabId)) finishJourney("tab-replaced", false);
+    });
     loadHeaderCapture(function (capture) {
       if (capture && (capture.tabId === removedTabId || capture.tabId === addedTabId)) revokeHeaderCapture();
     });
@@ -573,8 +948,23 @@ if (chrome.tabs.onReplaced) {
 }
 
 if (chrome.tabs.onUpdated) {
-  chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
-    if (!changeInfo || !changeInfo.url) return;
+  chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
+    if (!changeInfo) return;
+    loadJourney(function (journey) {
+      if (!journey || journey.tabId !== tabId || journey.status !== "recording") return;
+      if (changeInfo.url) {
+        let journeyOrigin = "";
+        try { journeyOrigin = new URL(changeInfo.url).origin; } catch (e) {}
+        if (journeyOrigin !== journey.origin) {
+          finishJourney("origin-changed", false);
+          return;
+        }
+        scheduleJourneyCapture(tabId, changeInfo.url, 750);
+        return;
+      }
+      if (changeInfo.status === "complete") scheduleJourneyCapture(tabId, tab && tab.url || "", 0);
+    });
+    if (!changeInfo.url) return;
     let nextOrigin = "";
     try { nextOrigin = new URL(changeInfo.url).origin; } catch (e) {}
     loadHeaderCapture(function (capture) {
@@ -590,18 +980,25 @@ if (chrome.tabs.onUpdated) {
 if (chrome.alarms) {
   chrome.alarms.onAlarm.addListener(function (alarm) {
     if (!alarm || alarm.name !== siteAccessAlarm) return;
-    loadHeaderCapture(function (capture) {
-      if (capture) {
-        revokeHeaderCapture();
+    loadJourney(function (journey) {
+      if (journey) {
+        if (journey.expiresAt <= Date.now()) finishJourney("time-limit", false);
+        else scheduleSiteAccessExpiry(journey.expiresAt);
         return;
       }
-      loadScanContext(function (scan) {
-        if (scan) {
-          revokeScanContext(scan);
+      loadHeaderCapture(function (capture) {
+        if (capture) {
+          revokeHeaderCapture();
           return;
         }
-        removeAllSitePermissions(function (removed) {
-          if (!removed) scheduleSiteAccessExpiry(Date.now() + 60 * 1000);
+        loadScanContext(function (scan) {
+          if (scan) {
+            revokeScanContext(scan);
+            return;
+          }
+          removeAllSitePermissions(function (removed) {
+            if (!removed) scheduleSiteAccessExpiry(Date.now() + 60 * 1000);
+          });
         });
       });
     });
@@ -622,7 +1019,7 @@ chrome.action.onClicked.addListener(function () {
 
 chrome.runtime.onInstalled.addListener(function () {
   resetSiteAccess();
-  chrome.storage.local.get(["lastScan", "scanHistory"], function (data) {
+  chrome.storage.local.get(["lastScan", "scanHistory", "journeyHistory"], function (data) {
     const migrated = migrateScan(data.lastScan);
     if (migrated) chrome.storage.local.set({ lastScan: migrated });
     else if (data.lastScan) chrome.storage.local.remove("lastScan");
@@ -661,6 +1058,11 @@ chrome.runtime.onInstalled.addListener(function () {
       }).slice(0, 12);
       chrome.storage.local.set({ scanHistory: history });
     }
+    if (Array.isArray(data.journeyHistory)) {
+      chrome.storage.local.set({
+        journeyHistory: data.journeyHistory.map(VulnscanJourneys.normalize).filter(Boolean).slice(0, 6)
+      });
+    }
   });
 });
 
@@ -675,8 +1077,78 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     sendResponse({ error: "Invalid message" });
     return true;
   }
-  if (message.type !== "scan_results" && message.type !== "export_secrets" && !isExtensionPage(sender)) {
+  const contentMessages = new Set(["scan_results", "export_secrets", "journey_page_results", "journey_export_secrets"]);
+  if (!contentMessages.has(message.type) && !isExtensionPage(sender)) {
     sendResponse({ error: "Extension page required" });
+    return true;
+  }
+
+  if (message.type === "journey_page_results") {
+    loadJourney(function (journey) {
+      if (!validJourneySender(message, sender, journey)) {
+        sendResponse({ error: "Journey context mismatch" });
+        return;
+      }
+      chrome.storage.session.get(journeyCapturesKey, function (data) {
+        const captures = data[journeyCapturesKey] || {};
+        const capture = captures[message.captureId];
+        if (!capture || capture.resultsReceived || capture.journeyId !== journey.journeyId || capture.tabId !== journey.tabId || capture.urlFingerprint !== exactUrlFingerprint(message.url)) {
+          sendResponse({ error: "Journey capture mismatch" });
+          return;
+        }
+        capture.resultsReceived = true;
+        chrome.storage.session.set({ [journeyCapturesKey]: captures });
+        const findings = (Array.isArray(message.findings) ? message.findings : []).slice(0, VulnscanFindings.limits.findings).map(cleanFinding);
+        const pageRef = VulnscanJourneys.routeId(VulnscanJourneys.route(message.url));
+        chrome.storage.session.get(journeyHeadersKey, function (headerData) {
+          const storedHeaders = headerData[journeyHeadersKey] && typeof headerData[journeyHeadersKey] === "object" ? headerData[journeyHeadersKey] : {};
+          const captured = storedHeaders[pageRef];
+          if (captured && captured.journeyId === journey.journeyId) {
+            const analysis = VulnscanHeaders.analyze(captured.headers, captured.url, VulnscanChecks.all());
+            findings.push.apply(findings, analysis.findings);
+            delete storedHeaders[pageRef];
+            chrome.storage.session.set({ [journeyHeadersKey]: storedHeaders });
+          }
+          const page = VulnscanJourneys.mergePageResults(journey, {
+            url: message.url,
+            title: message.title,
+            findings: VulnscanFindings.dedupe(findings),
+            surface: message.surface,
+            scanLimits: cleanScanLimits(message.scanLimits),
+            timestamp: Date.now()
+          });
+          persistJourney(journey, function (saved) {
+            broadcastJourney({ type: "journey_state_changed", state: "recording", journey: currentJourney });
+            sendResponse(page && saved ? { ok: true, pageRef: page.id } : { error: "Journey page could not be saved" });
+          });
+        });
+      });
+    });
+    return true;
+  }
+
+  if (message.type === "journey_export_secrets") {
+    loadJourney(function (journey) {
+      if (!validJourneySender(message, sender, journey)) {
+        sendResponse({ error: "Journey context mismatch" });
+        return;
+      }
+      chrome.storage.session.get(journeyCapturesKey, function (captureData) {
+        const capture = (captureData[journeyCapturesKey] || {})[message.captureId];
+        if (!capture || capture.journeyId !== journey.journeyId || capture.urlFingerprint !== exactUrlFingerprint(message.url)) {
+          sendResponse({ error: "Journey capture mismatch" });
+          return;
+        }
+        chrome.storage.session.get(vaultKey, function (vaultData) {
+          const stored = vaultData[vaultKey];
+          const previous = stored && stored.kind === "journey" && stored.journeyId === journey.journeyId ? stored.secrets : [];
+          const secrets = cleanSecrets(previous.concat(Array.isArray(message.secrets) ? message.secrets : []));
+          chrome.storage.session.set({
+            [vaultKey]: { kind: "journey", journeyId: journey.journeyId, origin: journey.origin, secrets: secrets }
+          }, function () { sendResponse({ ok: true, count: secrets.length }); });
+        });
+      });
+    });
     return true;
   }
 
@@ -723,6 +1195,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       }
       const secrets = cleanSecrets(message.secrets);
       const vault = {
+        kind: "scan",
         scanId: currentScan.id,
         url: comparableUrl(message.url),
         urlFingerprint: exactUrlFingerprint(message.url),
@@ -744,6 +1217,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         secrets: vault && sameScan && sameUrl ? vault.secrets.slice() : [],
         available: !!(vault && sameScan && sameUrl)
       });
+    });
+    return true;
+  }
+
+  if (message.type === "get_journey_secrets") {
+    chrome.storage.session.get(vaultKey, function (data) {
+      const vault = data[vaultKey] || null;
+      const available = !!(vault && vault.kind === "journey" && message.journeyId && vault.journeyId === message.journeyId && vault.origin === message.origin);
+      sendResponse({ secrets: available ? cleanSecrets(vault.secrets) : [], available: available });
     });
     return true;
   }
@@ -784,7 +1266,96 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 
+  if (message.type === "journey_get_state") {
+    loadJourney(function (journey) {
+      if (journey && journey.status === "recording" && journey.expiresAt <= Date.now()) {
+        finishJourney("time-limit", false, function (result) {
+          sendResponse({ active: false, journey: result && result.journey || null });
+        });
+        return;
+      }
+      sendResponse({ active: !!(journey && journey.status === "recording"), journey: journey || null });
+    });
+    return true;
+  }
+
+  if (message.type === "journey_begin") {
+    let origin = "";
+    try { origin = new URL(message.origin).origin; } catch (e) {}
+    const initialUrl = VulnscanJourneys.route(message.url);
+    if (!message.journeyId || String(message.journeyId).length > 100 || !Number.isInteger(message.tabId) || !origin || origin !== message.origin || VulnscanUrls.origin(initialUrl) !== origin) {
+      sendResponse({ error: "Invalid journey context" });
+      return true;
+    }
+    chrome.permissions.contains({ origins: [originPattern(origin)] }, function (hasAccess) {
+      if (!hasAccess) {
+        sendResponse({ error: "Exact-origin access is required" });
+        return;
+      }
+      loadScanContext(function (scan) {
+      if (scan) {
+        sendResponse({ error: "Finish the active assessment first" });
+        return;
+      }
+      loadJourney(function (activeJourney) {
+        if (activeJourney && activeJourney.status === "recording") {
+          sendResponse({ error: "A journey is already recording" });
+          return;
+        }
+        loadHeaderCapture(function (capture) {
+          const nextPattern = originPattern(origin);
+          const previous = capture && capture.originPattern !== nextPattern ? [capture.originPattern] : [];
+          removeOriginPatterns(previous, function (released) {
+            if (!released) {
+              sendResponse({ error: "Could not release previous site access" });
+              return;
+            }
+            clearSessionData(function () {
+              const journey = VulnscanJourneys.create({
+                journeyId: message.journeyId,
+                tabId: message.tabId,
+                origin: origin,
+                startedAt: Date.now()
+              });
+              currentJourney = journey;
+              VulnscanJourneys.noteNavigation(journey, { url: initialUrl, title: message.title || "", phase: "start", method: "GET" });
+              appendJourneyEvent(journey, { kind: "session", phase: "start", level: "success", details: { reason: "journey-started" } });
+              appendJourneyEvent(journey, { kind: "coverage", phase: "complete", level: "info", details: { reason: "cross-origin-api-outside-scope" } });
+              persistJourney(journey, function (saved) {
+                if (!saved) {
+                  sendResponse({ error: "Could not start journey storage" });
+                  return;
+                }
+                scheduleSiteAccessExpiry(journey.expiresAt);
+                scheduleJourneyCapture(journey.tabId, initialUrl, 0);
+                sendResponse({ ok: true, journey: currentJourney });
+              });
+            });
+          });
+        });
+      });
+      });
+    });
+    return true;
+  }
+
+  if (message.type === "journey_finish") {
+    finishJourney("finished", false, sendResponse);
+    return true;
+  }
+
+  if (message.type === "journey_discard") {
+    finishJourney("discarded", true, sendResponse);
+    return true;
+  }
+
   if (message.type === "scan_begin") {
+    chrome.storage.session.get(journeyDraftKey, function (journeyData) {
+      const activeJourney = VulnscanJourneys.normalize(journeyData[journeyDraftKey]);
+      if (activeJourney && activeJourney.status === "recording") {
+        sendResponse({ error: "Finish the active journey first" });
+        return;
+      }
     let origin = "";
     try { origin = new URL(message.origin).origin; } catch (e) {}
     if (!message.scanId || String(message.scanId).length > 100 || !Number.isInteger(message.tabId) || !origin || origin !== message.origin) {
@@ -820,6 +1391,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
           });
         });
       });
+    });
     });
     return true;
   }

@@ -11,6 +11,8 @@ const sharedFiles = [
   "dashboard.js",
   "finding-guidance.js",
   "finding-model.js",
+  "journey-model.js",
+  "header-analysis.js",
   "url-utils.js",
   "LICENSE",
   "README.md",

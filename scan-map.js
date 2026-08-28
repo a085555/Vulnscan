@@ -391,6 +391,113 @@
     };
   }
 
+  function journeyTargetNode(journey) {
+    let label = journey.origin || "Journey";
+    try { label = new URL(journey.origin).hostname || label; } catch (e) {}
+    return { id: "map-target", kind: "target", label: label, detail: journey.name || journey.origin, location: journey.origin, depth: 0, data: journey };
+  }
+
+  function journeyGraph(journey, view, filters) {
+    const options = Object.assign({ query: "", bucket: "all", severity: "all", confidence: "all", kind: "all" }, filters || {});
+    options.query = text(options.query).trim().toLowerCase();
+    const nodes = [journeyTargetNode(journey)];
+    const edges = [];
+    const includedPages = new Set();
+    const relatedPages = new Set();
+    if (options.query && options.kind === "all") {
+      (journey.apiEndpoints || []).filter(function (endpoint) { return matches(endpoint, options.query); }).forEach(function (endpoint) {
+        (endpoint.pageRefs || []).forEach(function (pageRef) { relatedPages.add(pageRef); });
+      });
+      (journey.findings || []).filter(function (finding) { return findingAllowed(finding, options); }).forEach(function (finding) {
+        (finding.pageRefs || []).forEach(function (pageRef) { relatedPages.add(pageRef); });
+      });
+      ((journey.surface && journey.surface.nodes) || []).filter(function (surface) { return matches(surface, options.query); }).forEach(function (surface) {
+        (surface.pageRefs || []).forEach(function (pageRef) { relatedPages.add(pageRef); });
+      });
+    }
+    const pages = (journey.pages || []).slice().sort(function (left, right) { return left.firstSeenAt - right.firstSeenAt; });
+    pages.forEach(function (page) {
+      const relationshipAnchor = !["all", "page"].includes(options.kind);
+      if (!relationshipAnchor && !matches(page, options.query) && !relatedPages.has(page.id)) return;
+      const id = "map-journey-page-" + page.id;
+      includedPages.add(page.id);
+      nodes.push({
+        id: id, kind: "page", pageRef: page.id, label: page.title || page.route, detail: page.route,
+        location: page.route, occurrences: page.visits, subtitle: page.visits + " visit" + (page.visits === 1 ? "" : "s"), depth: 1, data: page
+      });
+      edges.push({ from: "map-target", to: id, relation: "visited" });
+    });
+    if (view === "flow") {
+      const visitRefs = (journey.events || []).filter(function (event) {
+        return event.kind === "navigation" && event.phase === "complete" && includedPages.has(event.pageRef);
+      }).map(function (event) { return event.pageRef; });
+      const orderedRefs = visitRefs.length ? visitRefs : pages.filter(function (page) { return includedPages.has(page.id); }).map(function (page) { return page.id; });
+      const visitEdges = new Set();
+      for (let index = 1; index < orderedRefs.length; index++) {
+        const key = orderedRefs[index - 1] + "|" + orderedRefs[index];
+        if (orderedRefs[index - 1] !== orderedRefs[index] && !visitEdges.has(key)) {
+          visitEdges.add(key);
+          edges.push({ from: "map-journey-page-" + orderedRefs[index - 1], to: "map-journey-page-" + orderedRefs[index], relation: "visited next" });
+        }
+      }
+    }
+
+    const apiAllowed = options.kind === "all" || options.kind === "api-endpoint";
+    if (apiAllowed) {
+      (journey.apiEndpoints || []).forEach(function (endpoint) {
+        if (!matches(endpoint, options.query)) return;
+        const refs = (endpoint.pageRefs || []).filter(function (pageRef) { return includedPages.has(pageRef); });
+        if (!refs.length) return;
+        const id = "map-journey-api-" + endpoint.id;
+        nodes.push({
+          id: id, kind: "api-endpoint", endpointRef: endpoint.id, label: endpoint.method + " " + endpoint.route,
+          detail: endpoint.occurrences + " captured request" + (endpoint.occurrences === 1 ? "" : "s"), location: endpoint.route,
+          occurrences: endpoint.occurrences, subtitle: Object.keys(endpoint.statuses || {}).join(", ") || "No response", depth: 2, data: endpoint
+        });
+        refs.forEach(function (pageRef) { edges.push({ from: "map-journey-page-" + pageRef, to: id, relation: "requested" }); });
+      });
+    }
+
+    const surfaceAllowed = view !== "flow" && options.kind !== "page" && options.kind !== "api-endpoint";
+    const includedSurface = new Set();
+    if (surfaceAllowed) {
+      ((journey.surface && journey.surface.nodes) || []).forEach(function (surface) {
+        if (options.kind !== "all" && options.kind !== surface.kind) return;
+        if (!matches(surface, options.query)) return;
+        const refs = (surface.pageRefs || []).filter(function (pageRef) { return includedPages.has(pageRef); });
+        if (!refs.length) return;
+        const id = "map-journey-surface-" + surface.id;
+        includedSurface.add(surface.id);
+        nodes.push({
+          id: id, kind: surface.kind, surfaceId: surface.id, label: surface.label, detail: surface.detail,
+          location: surface.location, occurrences: surface.occurrences, external: surface.external, depth: 2, data: surface
+        });
+        refs.forEach(function (pageRef) { edges.push({ from: "map-journey-page-" + pageRef, to: id, relation: "observed" }); });
+      });
+    }
+
+    (journey.findings || []).filter(function (finding) {
+      return ["all", "finding"].includes(options.kind) && findingAllowed(finding, options);
+    }).forEach(function (finding) {
+      const refs = (finding.pageRefs || []).filter(function (pageRef) { return includedPages.has(pageRef); });
+      if (!refs.length) return;
+      const id = "map-journey-finding-" + finding.identityFingerprint;
+      nodes.push({
+        id: id, kind: "finding", findingRef: finding.identityFingerprint, label: finding.type, detail: finding.detail,
+        location: finding.location, severity: finding.severity, bucket: finding.bucket, subtitle: finding.pageCount + " page" + (finding.pageCount === 1 ? "" : "s"),
+        depth: view === "flow" ? 2 : 3, data: finding
+      });
+      const surfaces = (finding.surfaceRefs || []).filter(function (surfaceRef) { return includedSurface.has(surfaceRef); });
+      if (surfaces.length) surfaces.forEach(function (surfaceRef) { edges.push({ from: "map-journey-surface-" + surfaceRef, to: id, relation: "observed" }); });
+      else refs.forEach(function (pageRef) { edges.push({ from: "map-journey-page-" + pageRef, to: id, relation: "observed on" }); });
+    });
+    const capped = capGraph(nodes, edges);
+    capped.available = pages.length > 0;
+    capped.truncated = !!(journey.limits && Object.keys(journey.limits).some(function (key) { return journey.limits[key]; }));
+    capped.journey = true;
+    return capped;
+  }
+
   function build(scan, view, filters) {
     const options = Object.assign({ query: "", bucket: "all", severity: "all", confidence: "all", kind: "all" }, filters || {});
     options.query = text(options.query).trim().toLowerCase();
@@ -400,6 +507,10 @@
   function buildComparison(current, previous, filters) {
     const options = Object.assign({}, filters || {});
     return layout(collapseGraph(comparisonGraph(current, previous, options), options.collapsed));
+  }
+
+  function buildJourney(journey, view, filters) {
+    return layout(collapseGraph(journeyGraph(journey, view === "surface" ? "surface" : "flow", filters), filters && filters.collapsed));
   }
 
   function createSvg(name) {
@@ -619,6 +730,7 @@
   root.VulnscanMap = {
     build: build,
     buildComparison: buildComparison,
+    buildJourney: buildJourney,
     render: render,
     renderMiniMap: renderMiniMap,
     updateMiniMap: updateMiniMap,

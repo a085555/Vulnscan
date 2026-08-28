@@ -39,6 +39,8 @@
   const findings = [];
   const pageUrl = location.href;
   const scanId = globalThis.__vulnscanScanId || null;
+  const journeyId = globalThis.__vulnscanJourneyId || null;
+  const captureId = globalThis.__vulnscanCaptureId || null;
   const scanMode = globalThis.__vulnscanScanMode || "passive";
   const enabledChecks = VulnscanChecks.normalize(globalThis.__vulnscanEnabledChecks);
   const limits = VulnscanFindings.limits;
@@ -970,12 +972,15 @@
 
   const normalizedFindings = VulnscanFindings.dedupe(findings);
   chrome.runtime.sendMessage({
-    type: "scan_results",
+    type: journeyId ? "journey_page_results" : "scan_results",
     schemaVersion: 8,
     scanId: scanId,
+    journeyId: journeyId,
+    captureId: captureId,
     scanMode: scanMode,
     checksRun: VulnscanChecks.effective(enabledChecks, scanMode),
     url: pageUrl,
+    title: document.title || "",
     findings: normalizedFindings,
     summary: VulnscanFindings.summarize(normalizedFindings),
     risk: VulnscanFindings.risk(normalizedFindings),
@@ -985,8 +990,10 @@
 
   if (secretVault.length) {
     chrome.runtime.sendMessage({
-      type: "export_secrets",
+      type: journeyId ? "journey_export_secrets" : "export_secrets",
       scanId: scanId,
+      journeyId: journeyId,
+      captureId: captureId,
       url: pageUrl,
       secrets: secretVault
     });
@@ -995,4 +1002,6 @@
   delete globalThis.__vulnscanScanId;
   delete globalThis.__vulnscanScanMode;
   delete globalThis.__vulnscanEnabledChecks;
+  delete globalThis.__vulnscanJourneyId;
+  delete globalThis.__vulnscanCaptureId;
 })();

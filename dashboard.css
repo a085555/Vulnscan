@@ -1229,3 +1229,132 @@ kbd {
   .app { grid-template-columns: 1fr; }
   .sidebar { display: none; }
 }
+
+/* Journey capture */
+.journey-command {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 14px;
+  padding: 20px 22px;
+  border: 1px solid #2b4263;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #111b2b, #0d1521 68%);
+  box-shadow: var(--panel-shadow);
+}
+.journey-command h1 { margin: 3px 0 7px; font-size: 21px; letter-spacing: -.3px; }
+.journey-command p { max-width: 740px; color: #9cadc1; font-size: 12px; line-height: 1.6; }
+.journey-eyebrow { color: #7fa9e9; font: 700 9px/1.4 "JetBrains Mono", Consolas, monospace; letter-spacing: 1.2px; }
+.journey-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.journey-recording {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 9px 13px;
+  border: 1px solid #3c5272;
+  border-radius: 8px;
+  color: #b9cae0;
+  background: #101a28;
+  font: 10px/1.4 "JetBrains Mono", Consolas, monospace;
+}
+.journey-recording strong { color: #ff8194; letter-spacing: .8px; }
+.recording-dot, .console-status-dot { width: 7px; height: 7px; border-radius: 50%; background: #ff647c; box-shadow: 0 0 0 4px #ff647c18; }
+.journey-current-route { min-width: 0; margin-left: auto; overflow: hidden; color: #8296ad; text-overflow: ellipsis; white-space: nowrap; }
+.journey-stats { margin-bottom: 14px; }
+.journey-notice { margin-bottom: 14px; padding: 10px 13px; border: 1px solid #273b57; border-radius: 8px; color: #94a6bc; background: #0e1724; font-size: 11px; line-height: 1.5; }
+.journey-notice.warning { color: #e9c783; border-color: #594929; background: #1a1710; }
+.journey-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 14px; margin-bottom: 14px; }
+.journey-results-panel, .journey-hotspots-panel { min-height: 230px; }
+.journey-result-list { display: grid; gap: 8px; max-height: 360px; overflow: auto; }
+.journey-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  border: 1px solid #27384f;
+  border-radius: 8px;
+  background: #0d1520;
+  cursor: pointer;
+}
+.journey-result:hover { border-color: #47658e; background: #111d2d; }
+.journey-result strong { display: block; margin-bottom: 3px; font-size: 11px; }
+.journey-result small { display: block; overflow: hidden; color: #7f92a9; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.journey-result-pages { color: #89a5cb; font: 9px/1.4 "JetBrains Mono", Consolas, monospace; white-space: nowrap; }
+.journey-hotspot { display: block; width: 100%; padding: 10px 0; border: 0; border-bottom: 1px solid #223047; color: #cbd7e5; background: transparent; text-align: left; cursor: pointer; }
+.journey-hotspot:hover strong { color: #8db8ee; }
+.journey-hotspot:last-child { border-bottom: 0; }
+.journey-hotspot strong { display: block; overflow: hidden; margin-bottom: 4px; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.journey-hotspot span { color: #7e91a9; font-size: 9px; }
+.journey-history-panel { margin-top: 14px; }
+.journey-history-item { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 12px; border-bottom: 1px solid #223047; }
+.journey-history-item:last-child { border-bottom: 0; }
+.journey-history-item strong { display: block; margin-bottom: 4px; font-size: 11px; }
+.journey-history-item small { color: #7f92a9; font-size: 9px; }
+.journey-history-actions { display: flex; align-items: center; gap: 6px; }
+
+.capture-console {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 320px;
+  min-height: 170px;
+  max-height: 70vh;
+  overflow: hidden;
+  border: 1px solid #2a3a50;
+  border-radius: 10px;
+  background: #080d14;
+  box-shadow: 0 18px 48px #02050b88;
+}
+.capture-console.collapsed { height: 43px !important; min-height: 43px; }
+.capture-console.expanded { position: fixed; z-index: 80; inset: 12px; width: auto; height: auto !important; max-height: none; }
+.capture-console.collapsed .console-tools, .capture-console.collapsed .console-log, .capture-console.collapsed .console-new-events, .capture-console.collapsed .console-resize { display: none; }
+.console-resize { position: absolute; z-index: 2; top: -4px; right: 0; left: 0; height: 8px; cursor: ns-resize; }
+.console-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 7px 10px 7px 13px; border-bottom: 1px solid #223047; background: #0d141e; }
+.console-title, .console-actions, .console-filters { display: flex; align-items: center; gap: 7px; }
+.console-title strong { color: #c4d2e4; font: 700 10px/1.4 "JetBrains Mono", Consolas, monospace; letter-spacing: .7px; }
+.console-title span:last-child { color: #6e829c; font: 9px/1.4 "JetBrains Mono", Consolas, monospace; }
+.console-status-dot { background: #5d789d; box-shadow: none; }
+.capture-console.recording .console-status-dot { background: #ff647c; box-shadow: 0 0 0 4px #ff647c18; }
+.console-tools { display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; gap: 10px; padding: 8px 10px; border-bottom: 1px solid #1d2a3c; background: #0a111a; }
+.console-filter { padding: 5px 7px; border: 1px solid transparent; border-radius: 5px; color: #70859e; background: transparent; font: 9px/1.3 "JetBrains Mono", Consolas, monospace; cursor: pointer; }
+.console-filter:hover, .console-filter.active { color: #c4d5eb; border-color: #344d6c; background: #122036; }
+.console-tools input { min-width: 0; padding: 6px 9px; border: 1px solid #273b54; border-radius: 6px; color: #c7d3e2; background: #080e16; font: 10px/1.4 "JetBrains Mono", Consolas, monospace; outline: none; }
+.console-tools input:focus { border-color: #527cb5; }
+.console-log { overflow: auto; padding: 6px 0 12px; color: #a8b7c9; font: 10px/1.55 "JetBrains Mono", Consolas, monospace; scrollbar-color: #33465f #080d14; }
+.capture-console.wrap .console-row { white-space: normal; }
+.console-empty { padding: 20px; color: #596b80; text-align: center; }
+.console-row {
+  display: grid;
+  grid-template-columns: 86px 52px 70px 50px minmax(260px, 1fr) 42px 68px minmax(150px, .8fr);
+  gap: 8px;
+  min-height: 24px;
+  padding: 3px 12px;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  cursor: default;
+}
+.console-row:hover, .console-row.selected { background: #101a27; border-left-color: #5077aa; }
+.console-time, .console-sequence { color: #54687f; }
+.console-kind { color: #8ca8ca; font-weight: 700; }
+.console-route, .console-outcome { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.console-method, .console-status, .console-duration { color: #8194aa; }
+.console-row.event-api .console-kind { color: #71b9df; }
+.console-row.event-finding .console-kind { color: #ef8b9d; }
+.console-row.event-coverage .console-kind { color: #d7b36a; }
+.console-row.event-error .console-kind, .console-row.level-error .console-outcome { color: #ff7d91; }
+.console-row.level-warning .console-outcome { color: #d9b778; }
+.console-new-events { position: absolute; right: 16px; bottom: 14px; padding: 6px 10px; border: 1px solid #496b96; border-radius: 999px; color: #c7ddfb; background: #173052; font-size: 9px; cursor: pointer; box-shadow: 0 6px 18px #0008; }
+.scan-map-node.page .scan-map-node-frame { fill: #142943; stroke: #5793cf; }
+.scan-map-node.api-endpoint .scan-map-node-frame { fill: #102b2e; stroke: #4aa2a6; }
+
+@media (max-width: 1000px) {
+  .journey-command { flex-direction: column; }
+  .journey-actions { justify-content: flex-start; }
+  .journey-grid { grid-template-columns: 1fr; }
+  .console-tools { grid-template-columns: 1fr; }
+  .console-filters { flex-wrap: wrap; }
+  .console-row { grid-template-columns: 76px 48px 62px 46px minmax(220px, 1fr) 40px 62px minmax(130px, .8fr); }
+}

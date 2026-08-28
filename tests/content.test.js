@@ -41,6 +41,8 @@ function scan(options) {
     localStorage: settings.localStorage,
     sessionStorage: settings.sessionStorage,
     __vulnscanScanId: "scan-1",
+    __vulnscanJourneyId: settings.journeyId,
+    __vulnscanCaptureId: settings.captureId,
     __vulnscanScanMode: settings.mode || "passive",
     __vulnscanEnabledChecks: settings.enabledChecks
   };
@@ -51,6 +53,20 @@ function scan(options) {
   vm.runInContext(contentSource, context);
   return messages;
 }
+
+test("journey mode reuses passive collection and sends no scanner requests", function () {
+  const secret = "sk_live_" + "J".repeat(24);
+  const messages = scan({ html: secret, journeyId: "journey-1", captureId: "capture-1" });
+  const page = messages.find(function (message) { return message.type === "journey_page_results"; });
+  const vault = messages.find(function (message) { return message.type === "journey_export_secrets"; });
+  assert.ok(page);
+  assert.equal(page.journeyId, "journey-1");
+  assert.equal(page.captureId, "capture-1");
+  assert.equal(page.scanMode, "passive");
+  assert.equal(messages.some(function (message) { return message.type === "scan_results"; }), false);
+  assert.equal(vault.secrets.length, 1);
+  assert.doesNotMatch(JSON.stringify(page), new RegExp(secret));
+});
 
 function result(messages) {
   return messages.find(function (message) { return message.type === "scan_results"; });

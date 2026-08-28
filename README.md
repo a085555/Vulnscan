@@ -2,15 +2,15 @@
 
 Desktop browser security workspace for controlled passive and safe-active webpage checks.
 
-**Tool by a085** · v6.4.1
+**Tool by a085** · v6.5.0
 
-## What is new in v6.4.1
+## What is new in v6.5.0
 
-- Markdown reports now encode page-controlled text so exported evidence cannot create headings, links, raw HTML, or other report structure
-- Reports use a compact assessment summary, clearer coverage, numbered finding sections, readable filenames, and a cleaner full-secret layout
-- Exact-origin site access is released after a scan unless one manual refresh is needed to capture response headers
-- Pending header capture is limited to the selected tab and origin, survives a worker restart, expires after 10 minutes, and is revoked at browser startup
-- Clear data and site access now removes saved scan data, session data, and every optional site grant
+- Passive Journey Capture for one authorized tab and exact origin
+- Ordered Live Capture Console for navigation, page, same-origin API, finding, coverage, and lifecycle events
+- Journey Flow and Surface maps with console-to-map and map-to-console focus
+- Redacted Journey Markdown, JSON, and capture-log exports
+- Background recovery, automatic partial saves, six-entry journey history, and strict 30-minute collection limits
 
 ## Features
 
@@ -28,6 +28,8 @@ Desktop browser security workspace for controlled passive and safe-active webpag
 - Comparison with the previous scan using the same target and check profile
 - New, changed, resolved, and unchanged result filters
 - Session-only redacted request log
+- Passive journey recording with redacted route templates and same-origin fetch/XHR metadata
+- Resizable Live Capture Console with filtering, search, paused rendering, and follow-at-bottom behavior
 - Search and filters for category, confidence, severity, stage, change, and workflow state
 - Searchable interactive scan maps with evidence-path focus for current and historical scans
 - Comparison maps, collapsible branches, and a large-map overview navigator
@@ -80,6 +82,16 @@ The root `manifest.json` remains the Chrome development manifest. Browser-specif
 6. Use **Investigate** to review evidence, exploitability conditions, remediation, and technical context, or open the scan map to explore relationships.
 7. Assign a local workflow state and export a redacted report when needed.
 
+### Journey Capture
+
+1. Select a normal website tab and open **Journey**.
+2. Choose **Start journey** and approve access to the exact displayed origin.
+3. Browse that site normally. Vulnscan passively assesses completed pages and records redacted same-origin request metadata.
+4. Use the Live Capture Console and Journey map to move between the timeline, pages, API endpoints, and grouped findings.
+5. Choose **Finish and save** to keep the redacted journey, or **Discard** to remove the draft. Site access is released either way.
+
+Journey Capture does not crawl, submit forms, run active checks, or create scanner traffic. Cross-origin API traffic remains outside the authorized capture scope.
+
 Shortcuts: `S` scan · `C` clear · `E` Markdown export
 
 ## Scan modes
@@ -99,7 +111,7 @@ Workflow states, verification progress, queue membership, and notes are stored l
 
 ## Scan map
 
-The Surface view links results to bounded observations such as routes, parameter names, forms, resources, external origins, storage names, and authentication clues. The Scan flow view shows which selected stage and check produced each result, including limited or unavailable active-check coverage. When a compatible baseline exists, the Changes view groups new, changed, resolved, and unchanged findings and surface nodes. Branches can be collapsed, and larger graphs display an overview navigator. Selecting a node highlights its evidence route, while double-clicking centres it at a readable scale. Arrow keys move between neighbouring nodes. Compatible v6.2–v6.4 history keeps its redacted map data; earlier history can still use Scan flow view.
+The Surface view links results to bounded observations such as routes, parameter names, forms, resources, external origins, storage names, and authentication clues. The Scan flow view shows which selected stage and check produced each result, including limited or unavailable active-check coverage. When a compatible baseline exists, the Changes view groups new, changed, resolved, and unchanged findings and surface nodes. Branches can be collapsed, and larger graphs display an overview navigator. Selecting a node highlights its evidence route, while double-clicking centres it at a readable scale. Arrow keys move between neighbouring nodes. Journey maps add page and API nodes with visited-next, requested, and observed-on relationships. Compatible v6.2–v6.5 history keeps its redacted map data; earlier history can still use Scan flow view.
 
 ## Scan comparison
 
@@ -112,6 +124,10 @@ Vulnscan keeps redacted findings for the 12 most recent scans. Target matching u
 - Raw values are kept in browser session storage, matched to the scan and target URL, and cleared on a new scan, Clear, extension reload/update, or browser exit.
 - Full values remain available after a scan through the separate **Full secret values** export, which requires an extra confirmation.
 - Request logs contain only the method, redacted URL, status, duration, and outcome for the current browser session.
+- Live journey drafts, event queues, in-flight request metadata, and raw journey secrets stay in browser session storage. Only finalized redacted journeys are saved locally.
+- Journey URLs lose credentials and fragments before storage. Query names remain visible while values are redacted; numeric, UUID, and opaque path segments are replaced with templates.
+- Journey Capture never stores request or response bodies, form values, API header values, authorization data, or cookie values.
+- Exact-origin site access is released when a journey finishes, is discarded, times out, loses its tab, or leaves its authorized origin.
 - Captured Set-Cookie values are replaced before header analysis; only names and attributes are assessed.
 - Workflow records contain the target fingerprint, finding identity, state, verification progress, queue membership, a bounded local note, and update time. Notes are not exported.
 - Scan health records whether source, DOM, finding, or secret collection reached a configured limit.

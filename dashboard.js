@@ -44,6 +44,7 @@ const toggleRequestLogBtn = document.getElementById("toggleRequestLog");
 const exportMenu = document.getElementById("exportMenu");
 const exportMarkdownBtn = document.getElementById("exportMarkdownBtn");
 const exportJsonBtn = document.getElementById("exportJsonBtn");
+const exportJourneyLogBtn = document.getElementById("exportJourneyLogBtn");
 const exportSecretsBtn = document.getElementById("exportSecretsBtn");
 const authorizationModal = document.getElementById("authorizationModal");
 const authorizationDetails = document.getElementById("authorizationDetails");
@@ -87,6 +88,37 @@ const scanMapZoomOut = document.getElementById("scanMapZoomOut");
 const scanMapZoomIn = document.getElementById("scanMapZoomIn");
 const scanMapFit = document.getElementById("scanMapFit");
 const scanMapReset = document.getElementById("scanMapReset");
+const startJourneyBtn = document.getElementById("startJourneyBtn");
+const finishJourneyBtn = document.getElementById("finishJourneyBtn");
+const discardJourneyBtn = document.getElementById("discardJourneyBtn");
+const openJourneyMapBtn = document.getElementById("openJourneyMapBtn");
+const journeyRecordingBar = document.getElementById("journeyRecordingBar");
+const journeyOriginEl = document.getElementById("journeyOrigin");
+const journeyElapsedEl = document.getElementById("journeyElapsed");
+const journeyCurrentRouteEl = document.getElementById("journeyCurrentRoute");
+const journeyPagesEl = document.getElementById("journeyPages");
+const journeyApisEl = document.getElementById("journeyApis");
+const journeyFindingsEl = document.getElementById("journeyFindings");
+const journeyReviewEl = document.getElementById("journeyReview");
+const journeyEventsEl = document.getElementById("journeyEvents");
+const journeyNoticeEl = document.getElementById("journeyNotice");
+const journeyResultSummaryEl = document.getElementById("journeyResultSummary");
+const journeyResultListEl = document.getElementById("journeyResultList");
+const journeyHotspotsEl = document.getElementById("journeyHotspots");
+const journeyHistoryListEl = document.getElementById("journeyHistoryList");
+const deleteJourneyHistoryBtn = document.getElementById("deleteJourneyHistoryBtn");
+const captureConsole = document.getElementById("captureConsole");
+const captureConsoleResize = document.getElementById("captureConsoleResize");
+const consoleEventCount = document.getElementById("consoleEventCount");
+const consolePauseBtn = document.getElementById("consolePauseBtn");
+const consoleWrapBtn = document.getElementById("consoleWrapBtn");
+const consoleExpandBtn = document.getElementById("consoleExpandBtn");
+const consoleCollapseBtn = document.getElementById("consoleCollapseBtn");
+const consoleSearchEl = document.getElementById("consoleSearch");
+const consoleClearFocus = document.getElementById("consoleClearFocus");
+const consoleLogEl = document.getElementById("consoleLog");
+const consoleNewEvents = document.getElementById("consoleNewEvents");
+const scanControls = document.getElementById("scanControls");
 
 let selectedTabId = null;
 let currentFindings = [];
@@ -124,6 +156,19 @@ let mapSelectedNodeId = null;
 let mapFocusMode = true;
 let mapCollapsedNodes = new Set();
 let mapBaseStatus = "No map loaded";
+let mapJourneyMode = false;
+let activeView = "scan";
+let activeJourney = null;
+let selectedJourney = null;
+let journeyTimer = null;
+let consoleFilter = "all";
+let consoleSearch = "";
+let consolePaused = false;
+let consoleUnseen = 0;
+let consoleFollowing = true;
+let consoleFocus = null;
+let findingContext = "scan";
+let journeyFindingsContext = [];
 const mapScaleMin = 0.45;
 const mapScaleMax = 24;
 
@@ -289,14 +334,16 @@ function executeScript(options) {
 const triageOptions = ["open", "investigating", "accepted", "false-positive", "resolved"];
 
 function triageKey(finding) {
-  if (!finding || !lastScanData) return "";
+  if (!finding) return "";
+  if (findingContext === "journey" && selectedJourney) return VulnscanFindings.key(selectedJourney.origin) + ":" + finding.identityFingerprint;
+  if (!lastScanData) return "";
   return lastScanData.urlFingerprint + ":" + finding.identityFingerprint;
 }
 
 function workflowFor(finding) {
   const key = triageKey(finding);
   let saved = triageStates[key];
-  if (!saved && lastScanData) {
+  if (!saved && lastScanData && findingContext !== "journey") {
     const legacyKey = (lastScanData.legacyUrlFingerprint || lastScanData.urlFingerprint) + ":" + finding.fingerprint;
     saved = triageStates[legacyKey];
     if (saved) triageStates[key] = saved;
@@ -354,7 +401,8 @@ function saveTriageState(finding, status) {
 }
 
 function findingByFingerprint(fingerprint) {
-  return currentFindings.find(function (finding) {
+  const source = findingContext === "journey" ? journeyFindingsContext : currentFindings;
+  return source.find(function (finding) {
     return finding.fingerprint === fingerprint;
   }) || null;
 }
@@ -379,8 +427,12 @@ function investigationBrief(finding) {
   const guidance = VulnscanGuidance.get(finding);
   const priority = VulnscanGuidance.priority(finding);
   const education = guidance.exploitability;
+  const journey = findingContext === "journey" ? selectedJourney : null;
+  const journeyPages = journey ? (finding.pageRefs || []).map(function (pageRef) {
+    return (journey.pages || []).find(function (page) { return page.id === pageRef; });
+  }).filter(Boolean) : [];
   let text = finding.type + "\n";
-  text += "Target: " + (lastScanData ? lastScanData.url : "") + "\n";
+  text += "Target: " + (journey ? journey.origin : lastScanData ? lastScanData.url : "") + "\n";
   text += "Severity: " + finding.severity + " | Confidence: " + finding.confidence + " | Priority: " + priority.label + " (" + priority.score + ")\n";
   text += "Workflow: " + triageLabel(triageStateFor(finding)) + "\n";
   text += "Stage: " + sourceLabel(finding.source) + " | Category: " + categoryLabel(finding.category) + "\n\n";
@@ -393,6 +445,7 @@ function investigationBrief(finding) {
   text += "Evidence that would weaken it: " + guidance.exploitability.weakens.join("; ") + "\n\n";
   text += "Recommended action\n" + guidance.remediation + "\n\n";
   text += "Verification\n" + (finding.verification || guidance.steps[0]) + "\n\n";
+  if (journeyPages.length) text += "Affected pages\n" + journeyPages.map(function (page) { return "- " + page.route; }).join("\n") + "\n\n";
   if (finding.location) text += "Affected location: " + finding.location + "\n";
   text += "Check ID: " + finding.checkId + "\nFingerprint: " + finding.fingerprint + "\nIdentity: " + finding.identityFingerprint + "\n";
   return text;
@@ -412,6 +465,13 @@ function openFindingDrawer(fingerprint) {
   const guidance = VulnscanGuidance.get(finding);
   const priority = VulnscanGuidance.priority(finding);
   const education = guidance.exploitability;
+  const journey = findingContext === "journey" ? selectedJourney : null;
+  const journeyPages = journey ? (finding.pageRefs || []).map(function (pageRef) {
+    return (journey.pages || []).find(function (page) { return page.id === pageRef; });
+  }).filter(Boolean) : [];
+  const affectedPages = journeyPages.length ? '<section class="drawer-section"><h3>Affected pages</h3><ol>' + journeyPages.map(function (page) {
+    return "<li>" + escapeHtml(page.route) + "</li>";
+  }).join("") + "</ol></section>" : "";
   const change = currentComparisonStatuses.get(finding.fingerprint);
   const workflow = triageStateFor(finding);
   const workflowState = workflowFor(finding);
@@ -447,6 +507,7 @@ function openFindingDrawer(fingerprint) {
     "</div>" +
     '<div class="priority-meter"><span>' + escapeHtml(priority.label) + '</span><div class="priority-track"><div class="priority-fill" style="width:' + priority.score + '%"></div></div><strong>' + priority.score + "</strong></div>" +
     '<section class="drawer-section"><h3>Observation</h3><p>' + escapeHtml(finding.detail || "No additional detail recorded.") + "</p></section>" +
+    affectedPages +
     '<section class="drawer-section"><h3>Evidence</h3><p>' + escapeHtml(finding.evidence || "No additional evidence recorded.") + "</p></section>" +
     '<section class="drawer-section"><h3>Why it matters</h3><p>' + escapeHtml(guidance.impact) + "</p></section>" +
     '<section class="drawer-section exploitability-section"><div class="exploitability-head"><h3>Exploitability</h3><span class="exploitability-badge ' + escapeHtml(education.level) + '">' + escapeHtml(education.level) + '</span></div><p class="exploitability-lead">' + escapeHtml(education.plainLanguage) + '</p>' +
@@ -458,7 +519,7 @@ function openFindingDrawer(fingerprint) {
       return "<li>" + escapeHtml(step) + "</li>";
     }).join("") + "</ol></section>" + verificationPanel +
     '<section class="drawer-section"><h3>Technical details</h3><dl class="technical-grid">' +
-    "<dt>Target</dt><dd>" + escapeHtml(lastScanData ? lastScanData.url : "") + "</dd>" +
+    "<dt>Target</dt><dd>" + escapeHtml(journey ? journey.origin : lastScanData ? lastScanData.url : "") + "</dd>" +
     "<dt>Check ID</dt><dd>" + escapeHtml(finding.checkId) + "</dd>" +
     "<dt>Fingerprint</dt><dd>" + escapeHtml(finding.fingerprint) + "</dd>" +
     "<dt>Stable identity</dt><dd>" + escapeHtml(finding.identityFingerprint) + "</dd>" +
@@ -488,8 +549,8 @@ function openFindingDrawer(fingerprint) {
     saveWorkflowState(finding, { note: note.value });
     setStatus("Local investigation note saved");
   });
-  if (showAffectedBtn) showAffectedBtn.hidden = !finding.selector;
-  if (showFindingMapBtn) showFindingMapBtn.hidden = !lastScanData;
+  if (showAffectedBtn) showAffectedBtn.hidden = findingContext === "journey" || !finding.selector;
+  if (showFindingMapBtn) showFindingMapBtn.hidden = findingContext === "journey" ? !selectedJourney : !lastScanData;
   if (toggleQueueBtn) toggleQueueBtn.textContent = workflowState.pinned ? "Remove from queue" : "Add to queue";
   findingDrawer.hidden = false;
   if (findingDrawerClose && typeof findingDrawerClose.focus === "function") findingDrawerClose.focus();
@@ -529,6 +590,7 @@ function closeScanMap() {
   if (!scanMapDialog) return;
   scanMapDialog.hidden = true;
   mapScanData = null;
+  mapJourneyMode = false;
   mapGraph = null;
   mapDragging = false;
   mapPointer = null;
@@ -602,7 +664,7 @@ function centerMapNode(node) {
 }
 
 function mapCoverage(node) {
-  if (!mapScanData || node.kind !== "check") return null;
+  if (!mapScanData || mapJourneyMode || node.kind !== "check") return null;
   return (mapScanData.coverage || []).find(function (entry) { return entry.checkId === node.checkId; }) || null;
 }
 
@@ -620,6 +682,11 @@ function updateMapSelection(node, center) {
   const selected = VulnscanMap.highlight(scanMapSvg, mapGraph, node.id, mapFocusMode);
   if (scanMapMiniMap && !scanMapMiniMap.hidden) VulnscanMap.updateMiniMap(scanMapMiniMap, mapGraph, { x: mapPanX, y: mapPanY, scale: mapScale }, node.id);
   renderMapDetails(node);
+  if (mapJourneyMode) {
+    consoleFocus = node.pageRef ? { pageRef: node.pageRef } : node.endpointRef ? { endpointRef: node.endpointRef } : node.findingRef ? { findingRef: node.findingRef } : null;
+    if (consoleClearFocus) consoleClearFocus.hidden = !consoleFocus;
+    renderCaptureConsole(true);
+  }
   if (scanMapStatus) scanMapStatus.textContent = mapBaseStatus + " · " + selected.nodeIds.length + " nodes in path";
   if (center) centerMapNode(node);
 }
@@ -629,7 +696,8 @@ function renderMapDetails(node) {
   if (node.kind === "finding") {
     const finding = node.data;
     const guidance = VulnscanGuidance.get(finding);
-    const current = !node.resolved && lastScanData && mapScanData && lastScanData.scanId === mapScanData.scanId && !!findingByFingerprint(finding.fingerprint);
+    const current = mapJourneyMode ? !!(selectedJourney && findingByFingerprint(finding.fingerprint)) :
+      !node.resolved && lastScanData && mapScanData && lastScanData.scanId === mapScanData.scanId && !!findingByFingerprint(finding.fingerprint);
     const changed = node.change === "changed" && node.previous ? '<dt>Changed fields</dt><dd>' + escapeHtml((node.changedFields || []).join(", ") || "Recorded evidence") + '</dd><dt>Previous observation</dt><dd>' + escapeHtml(node.previous.detail || "Not recorded") + "</dd>" : "";
     const actions = '<div class="map-detail-actions"><button class="btn ghost map-center-node">Centre node</button>' +
       (current ? '<button class="btn primary map-investigate" data-fingerprint="' + escapeHtml(finding.fingerprint) + '">Open investigation</button>' : "") + "</div>";
@@ -649,10 +717,17 @@ function renderMapDetails(node) {
   const coverage = mapCoverage(node);
   const detail = node.detail || node.kind;
   const collapsible = node.kind === "group" || node.kind === "stage";
+  const journeyData = mapJourneyMode && node.data ? node.data : null;
+  const endpointStatuses = node.kind === "api-endpoint" && journeyData ? Object.keys(journeyData.statuses || {}).map(function (status) {
+    return status + " × " + journeyData.statuses[status];
+  }).join(", ") : "";
+  const averageDuration = node.kind === "api-endpoint" && journeyData && journeyData.occurrences ? Math.round(journeyData.durationTotalMs / journeyData.occurrences) : 0;
   scanMapDetails.innerHTML = '<div class="map-detail-eyebrow">' + (node.change ? escapeHtml(node.change) + " · " : "") + escapeHtml(categoryLabel(node.kind)) + '</div><h3>' + escapeHtml(node.label) + '</h3>' + mapBreadcrumb(node) + '<p>' + escapeHtml(detail) + '</p><dl>' +
     (node.location ? '<dt>Location</dt><dd>' + escapeHtml(node.location) + '</dd>' : "") +
     (node.occurrences ? '<dt>Occurrences</dt><dd>' + Number(node.occurrences) + '</dd>' : "") +
     (node.status ? '<dt>Status</dt><dd>' + escapeHtml(node.status) + '</dd>' : "") +
+    (endpointStatuses ? '<dt>Responses</dt><dd>' + escapeHtml(endpointStatuses) + '</dd><dt>Average duration</dt><dd>' + averageDuration + ' ms</dd>' : "") +
+    (node.kind === "page" && journeyData ? '<dt>First seen</dt><dd>' + escapeHtml(new Date(journeyData.firstSeenAt).toLocaleString()) + '</dd><dt>Last seen</dt><dd>' + escapeHtml(new Date(journeyData.lastSeenAt).toLocaleString()) + '</dd>' : "") +
     (coverage ? '<dt>Coverage</dt><dd>' + escapeHtml(coverage.status) + ' · ' + coverage.inspected + ' inspected · ' + coverage.matched + ' matched</dd>' : "") +
     (node.hiddenCount ? '<dt>Collapsed</dt><dd>' + Number(node.hiddenCount) + " hidden nodes</dd>" : "") +
     '</dl><div class="map-detail-actions"><button class="btn ghost map-center-node">Centre node</button>' +
@@ -680,7 +755,8 @@ function renderScanMap(options) {
     collapsed: Array.from(mapCollapsedNodes),
     comparableStages: currentComparisonResult ? currentComparisonResult.comparableStages : []
   };
-  if (mapView === "changes" && currentComparisonScan && currentComparisonResult) mapGraph = VulnscanMap.buildComparison(mapScanData, currentComparisonScan, filters);
+  if (mapJourneyMode) mapGraph = VulnscanMap.buildJourney(mapScanData, mapView, filters);
+  else if (mapView === "changes" && currentComparisonScan && currentComparisonResult) mapGraph = VulnscanMap.buildComparison(mapScanData, currentComparisonScan, filters);
   else mapGraph = VulnscanMap.build(mapScanData, mapView, filters);
   VulnscanMap.render(scanMapSvg, mapGraph, {
     select: function (node) { updateMapSelection(node, false); },
@@ -707,7 +783,7 @@ function renderScanMap(options) {
       scanMapStatus.textContent += " · " + path.nodeIds.length + " nodes in path";
     }
   }
-  if (scanMapKind) scanMapKind.disabled = mapView === "flow";
+  if (scanMapKind) scanMapKind.disabled = !mapJourneyMode && mapView === "flow";
   if (scanMapChange) scanMapChange.disabled = mapView !== "changes";
 }
 
@@ -715,6 +791,8 @@ function openScanMap(scan, returnFocus, selectedNodeId, preferredView) {
   const normalized = normalizeScan(scan);
   if (!normalized || !scanMapDialog) return;
   mapScanData = normalized;
+  mapJourneyMode = false;
+  findingContext = "scan";
   mapSelectedNodeId = selectedNodeId || null;
   mapCollapsedNodes = new Set();
   mapReturnFocus = returnFocus || document.activeElement || null;
@@ -722,9 +800,45 @@ function openScanMap(scan, returnFocus, selectedNodeId, preferredView) {
   mapView = preferredView === "changes" && changesAvailable ? "changes" : normalized.surface.nodes.some(function (node) { return node.kind !== "target"; }) ? "surface" : "flow";
   if (scanMapChanges) scanMapChanges.hidden = !changesAvailable;
   document.querySelectorAll(".scan-map-view").forEach(function (button) {
+    if (button.getAttribute("data-map-view") === "flow") button.textContent = "Scan flow";
     button.classList.toggle("active", button.getAttribute("data-map-view") === mapView);
   });
   if (scanMapSubtitle) scanMapSubtitle.textContent = normalized.url + " · " + sourceLabel(normalized.scanMode) + " · " + new Date(normalized.timestamp).toLocaleString();
+  if (scanMapSearch) scanMapSearch.value = "";
+  if (scanMapKind) scanMapKind.value = "all";
+  if (scanMapBucket) scanMapBucket.value = "all";
+  if (scanMapSeverity) scanMapSeverity.value = "all";
+  if (scanMapConfidence) scanMapConfidence.value = "all";
+  if (scanMapChange) scanMapChange.value = "all";
+  scanMapDialog.hidden = false;
+  renderScanMap({ resetView: true });
+  if (mapSelectedNodeId && mapGraph) {
+    const selected = mapGraph.nodes.find(function (node) { return node.id === mapSelectedNodeId; });
+    if (selected) updateMapSelection(selected, true);
+  }
+  if (scanMapClose) scanMapClose.focus();
+}
+
+function openJourneyMap(journey, returnFocus, selectedNodeId, preferredView) {
+  const normalized = VulnscanJourneys.normalize(journey);
+  if (!normalized || !scanMapDialog) return;
+  selectedJourney = normalized;
+  journeyFindingsContext = normalized.findings;
+  findingContext = "journey";
+  mapScanData = normalized;
+  mapJourneyMode = true;
+  mapSelectedNodeId = selectedNodeId || null;
+  mapCollapsedNodes = new Set();
+  mapReturnFocus = returnFocus || document.activeElement || null;
+  mapView = preferredView === "surface" ? "surface" : "flow";
+  if (scanMapChanges) scanMapChanges.hidden = true;
+  document.querySelectorAll(".scan-map-view").forEach(function (button) {
+    const view = button.getAttribute("data-map-view");
+    button.classList.toggle("active", view === mapView);
+    if (view === "surface") button.textContent = "Surface";
+    if (view === "flow") button.textContent = "Journey flow";
+  });
+  if (scanMapSubtitle) scanMapSubtitle.textContent = normalized.origin + " · " + normalized.pages.length + " pages · " + normalized.apiEndpoints.length + " API routes";
   if (scanMapSearch) scanMapSearch.value = "";
   if (scanMapKind) scanMapKind.value = "all";
   if (scanMapBucket) scanMapBucket.value = "all";
@@ -1678,6 +1792,7 @@ async function runActiveChecks(pageUrl, scanId, requestController, options) {
 function renderFindings(data) {
   const scan = normalizeScan(data);
   if (!scan) return false;
+  findingContext = "scan";
   lastScanData = scan;
   currentFindings = scan.findings;
   currentComparisonStatuses = new Map();
@@ -2013,6 +2128,360 @@ function loadHistory() {
   });
 }
 
+function runtimeMessage(message) {
+  return new Promise(function (resolve) {
+    chrome.runtime.sendMessage(message, function (response) {
+      resolve(response || { error: chrome.runtime.lastError ? chrome.runtime.lastError.message : "No response" });
+    });
+  });
+}
+
+function journeyForView() {
+  return activeJourney || selectedJourney;
+}
+
+function formatElapsed(milliseconds) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remaining = seconds % 60;
+  return (hours ? String(hours).padStart(2, "0") + ":" : "") + String(minutes).padStart(2, "0") + ":" + String(remaining).padStart(2, "0");
+}
+
+function updateJourneyClock() {
+  if (!journeyElapsedEl) return;
+  const journey = journeyForView();
+  if (!journey) {
+    journeyElapsedEl.textContent = "00:00";
+    return;
+  }
+  const end = journey.status === "recording" ? Date.now() : journey.endedAt || journey.startedAt;
+  journeyElapsedEl.textContent = formatElapsed(end - journey.startedAt);
+}
+
+function setJourneyTimer(active) {
+  if (journeyTimer) clearInterval(journeyTimer);
+  journeyTimer = null;
+  updateJourneyClock();
+  if (active) journeyTimer = setInterval(updateJourneyClock, 1000);
+}
+
+function journeyPage(journey, pageRef) {
+  return journey && (journey.pages || []).find(function (page) { return page.id === pageRef; });
+}
+
+function journeyEventLabel(item) {
+  if (item.kind === "api") return item.phase === "start" ? "API →" : "API ←";
+  return { session: "SESSION", navigation: "NAV", page: "PAGE", finding: "FINDING", coverage: "COVERAGE", error: "ERROR" }[item.kind] || String(item.kind || "EVENT").toUpperCase();
+}
+
+function journeyEventMessage(item) {
+  const details = item.details || {};
+  const parts = [];
+  if (item.method) parts.push(item.method);
+  if (item.status) parts.push(String(item.status));
+  if (item.route) parts.push(item.route);
+  if (item.durationMs) parts.push(item.durationMs + " ms");
+  if (details.findingType) parts.push((details.severity ? details.severity.toUpperCase() + " " : "") + details.findingType);
+  if (details.findings !== undefined || details.review !== undefined) parts.push((details.findings || 0) + " findings · " + (details.review || 0) + " review");
+  if (details.reason) parts.push(details.reason.replace(/-/g, " "));
+  if (item.outcome && !["complete", "started"].includes(item.outcome)) parts.push(item.outcome);
+  return parts.join("  ·  ") || item.phase;
+}
+
+function journeyEventOutcome(item) {
+  const details = item.details || {};
+  if (details.findingType) return (details.severity ? details.severity.toUpperCase() + " " : "") + details.findingType;
+  if (details.findings !== undefined || details.review !== undefined) return (details.findings || 0) + " findings · " + (details.review || 0) + " review";
+  if (details.reason) return details.reason.replace(/-/g, " ");
+  return item.outcome && item.outcome !== "complete" ? item.outcome : item.phase;
+}
+
+function consoleEventVisible(item) {
+  const system = ["session", "coverage", "error"].includes(item.kind);
+  if (consoleFilter !== "all" && !(consoleFilter === "system" ? system : item.kind === consoleFilter)) return false;
+  if (consoleFocus) {
+    if (consoleFocus.pageRef && item.pageRef !== consoleFocus.pageRef) return false;
+    if (consoleFocus.endpointRef && item.endpointRef !== consoleFocus.endpointRef) return false;
+    if (consoleFocus.findingRef && item.findingRef !== consoleFocus.findingRef) return false;
+  }
+  if (!consoleSearch) return true;
+  return [journeyEventLabel(item), journeyEventMessage(item), item.route, item.method, item.status].join(" ").toLowerCase().includes(consoleSearch);
+}
+
+function focusJourneyEvent(item, returnFocus) {
+  const journey = journeyForView();
+  if (!journey || !item) return;
+  let nodeId = "";
+  let view = "flow";
+  if (item.findingRef) {
+    nodeId = "map-journey-finding-" + item.findingRef;
+    view = "surface";
+  } else if (item.endpointRef) nodeId = "map-journey-api-" + item.endpointRef;
+  else if (item.pageRef) nodeId = "map-journey-page-" + item.pageRef;
+  if (nodeId) openJourneyMap(journey, returnFocus, nodeId, view);
+}
+
+function renderCaptureConsole(force) {
+  if (!consoleLogEl) return;
+  if (!force && (consolePaused || (!consoleFollowing && activeJourney))) return;
+  const journey = journeyForView();
+  const events = journey ? (journey.events || []).filter(consoleEventVisible) : [];
+  consoleLogEl.textContent = "";
+  if (!events.length) {
+    const empty = document.createElement("div");
+    empty.className = "console-empty";
+    empty.textContent = journey ? "No events match the current console filters." : "Waiting for Journey Capture to start.";
+    consoleLogEl.appendChild(empty);
+  } else {
+    events.forEach(function (item) {
+      const row = document.createElement("div");
+      row.className = "console-row event-" + item.kind + " level-" + item.level;
+      row.setAttribute("data-sequence", item.sequence);
+      if (consoleFocus && ((consoleFocus.pageRef && item.pageRef === consoleFocus.pageRef) || (consoleFocus.endpointRef && item.endpointRef === consoleFocus.endpointRef) || (consoleFocus.findingRef && item.findingRef === consoleFocus.findingRef))) row.classList.add("selected");
+      const time = document.createElement("span");
+      time.className = "console-time";
+      time.textContent = new Date(item.timestamp).toISOString().slice(11, 23);
+      const sequence = document.createElement("span");
+      sequence.className = "console-sequence";
+      sequence.textContent = "#" + String(item.sequence).padStart(4, "0");
+      const kind = document.createElement("span");
+      kind.className = "console-kind";
+      kind.textContent = journeyEventLabel(item);
+      const method = document.createElement("span");
+      method.className = "console-method";
+      method.textContent = item.method || "—";
+      const route = document.createElement("span");
+      route.className = "console-route";
+      route.textContent = item.route || "—";
+      const status = document.createElement("span");
+      status.className = "console-status";
+      status.textContent = item.status || "—";
+      const duration = document.createElement("span");
+      duration.className = "console-duration";
+      duration.textContent = item.durationMs ? item.durationMs + " ms" : "—";
+      const outcome = document.createElement("span");
+      outcome.className = "console-outcome";
+      outcome.textContent = journeyEventOutcome(item);
+      row.appendChild(time);
+      row.appendChild(sequence);
+      row.appendChild(kind);
+      row.appendChild(method);
+      row.appendChild(route);
+      row.appendChild(status);
+      row.appendChild(duration);
+      row.appendChild(outcome);
+      row.addEventListener("click", function () { focusJourneyEvent(item, row); });
+      consoleLogEl.appendChild(row);
+    });
+  }
+  if (consoleEventCount) consoleEventCount.textContent = (journey ? journey.events.length : 0) + " events";
+  if (consoleFollowing && !consolePaused) consoleLogEl.scrollTop = consoleLogEl.scrollHeight;
+}
+
+function renderJourneyResults(journey) {
+  if (!journeyResultListEl || !journeyResultSummaryEl) return;
+  journeyFindingsContext = journey ? journey.findings || [] : [];
+  if (!journey || !journey.findings.length) {
+    journeyResultSummaryEl.textContent = journey ? "No findings or review clues" : "No journey loaded";
+    journeyResultListEl.innerHTML = '<div class="empty-hint">Findings from visited pages will be grouped here.</div>';
+    return;
+  }
+  journeyResultSummaryEl.textContent = journey.summary.findings + " findings · " + journey.summary.review + " review";
+  journeyResultListEl.innerHTML = journey.findings.map(function (finding) {
+    return '<button class="journey-result" data-fingerprint="' + escapeHtml(finding.fingerprint) + '"><span class="severity ' + escapeHtml(finding.severity) + '">' + escapeHtml(finding.severity) + '</span><span><strong>' + escapeHtml(finding.type) + '</strong><small>' + escapeHtml(finding.detail) + '</small></span><span class="journey-result-pages">' + Number(finding.pageCount || 0) + ' page' + (finding.pageCount === 1 ? "" : "s") + "</span></button>";
+  }).join("");
+  journeyResultListEl.querySelectorAll(".journey-result").forEach(function (button) {
+    button.addEventListener("click", function () {
+      findingContext = "journey";
+      openFindingDrawer(button.getAttribute("data-fingerprint"));
+    });
+  });
+}
+
+function renderJourneyHotspots(journey) {
+  if (!journeyHotspotsEl) return;
+  if (!journey || !journey.pages.length) {
+    journeyHotspotsEl.innerHTML = '<div class="empty-hint">No page hotspots yet.</div>';
+    return;
+  }
+  const endpoints = journey.apiEndpoints || [];
+  const hotspots = journey.pages.map(function (page) {
+    const findings = (journey.findings || []).filter(function (finding) { return (finding.pageRefs || []).includes(page.id); });
+    return {
+      page: page,
+      findings: findings.filter(function (finding) { return finding.bucket === "finding"; }).length,
+      review: findings.filter(function (finding) { return finding.bucket === "review"; }).length,
+      apis: endpoints.filter(function (endpoint) { return (endpoint.pageRefs || []).includes(page.id); }).length
+    };
+  }).sort(function (left, right) {
+    if (left.findings !== right.findings) return right.findings - left.findings;
+    if (left.review !== right.review) return right.review - left.review;
+    if (left.apis !== right.apis) return right.apis - left.apis;
+    return left.page.route.localeCompare(right.page.route);
+  }).slice(0, 5);
+  journeyHotspotsEl.innerHTML = hotspots.map(function (item) {
+    return '<button class="journey-hotspot" data-page-ref="' + escapeHtml(item.page.id) + '"><strong>' + escapeHtml(item.page.title || item.page.route) + '</strong><span>' + item.findings + " findings · " + item.review + " review · " + item.apis + " APIs</span></button>";
+  }).join("");
+  journeyHotspotsEl.querySelectorAll(".journey-hotspot").forEach(function (button) {
+    button.addEventListener("click", function () {
+      openJourneyMap(journey, button, "map-journey-page-" + button.getAttribute("data-page-ref"), "surface");
+    });
+  });
+}
+
+function renderJourney(journey) {
+  const normalized = VulnscanJourneys.normalize(journey);
+  if (normalized) selectedJourney = normalized;
+  const shown = normalized || selectedJourney;
+  const recording = !!(activeJourney && activeJourney.status === "recording");
+  if (journeyRecordingBar) journeyRecordingBar.hidden = !recording;
+  if (startJourneyBtn) startJourneyBtn.hidden = recording;
+  if (finishJourneyBtn) finishJourneyBtn.hidden = !recording;
+  if (discardJourneyBtn) discardJourneyBtn.hidden = !recording;
+  if (openJourneyMapBtn) openJourneyMapBtn.hidden = !shown || !shown.pages.length;
+  if (scanBtn) scanBtn.disabled = scanning || recording;
+  if (tabSelect) tabSelect.disabled = recording;
+  if (refreshTabsBtn) refreshTabsBtn.disabled = recording;
+  if (captureConsole) captureConsole.classList.toggle("recording", recording);
+  if (exportJourneyLogBtn) exportJourneyLogBtn.hidden = activeView !== "journey" || !shown;
+  if (journeyOriginEl) journeyOriginEl.textContent = shown ? shown.origin : "No origin selected";
+  const currentPage = shown ? journeyPage(shown, shown.currentPageRef) : null;
+  if (journeyCurrentRouteEl) journeyCurrentRouteEl.textContent = currentPage ? currentPage.route : "Waiting for a page";
+  if (journeyPagesEl) journeyPagesEl.textContent = shown ? shown.pages.length : 0;
+  if (journeyApisEl) journeyApisEl.textContent = shown ? shown.apiEndpoints.length : 0;
+  if (journeyFindingsEl) journeyFindingsEl.textContent = shown ? shown.summary.findings : 0;
+  if (journeyReviewEl) journeyReviewEl.textContent = shown ? shown.summary.review : 0;
+  if (journeyEventsEl) journeyEventsEl.textContent = shown ? shown.events.length : 0;
+  if (journeyNoticeEl) {
+    const limited = shown && shown.limits && Object.keys(shown.limits).filter(function (key) { return shown.limits[key]; });
+    journeyNoticeEl.classList.toggle("warning", !!(limited && limited.length));
+    journeyNoticeEl.textContent = limited && limited.length ? "Capture limits reached: " + limited.join(", ") + ". Aggregated results remain available, but coverage is incomplete." :
+      recording ? "Recording passive evidence from the selected tab. Cross-origin API traffic remains outside this exact-origin session." :
+        shown ? "Saved redacted journey. Raw secret values are available only if this is the latest journey from the current browser session." :
+          "Select a normal website tab and start a journey. Capture stays on that exact origin and creates no requests of its own.";
+  }
+  renderJourneyResults(shown);
+  renderJourneyHotspots(shown);
+  renderCaptureConsole(false);
+  setJourneyTimer(recording);
+}
+
+function loadJourneyHistory(selectNewest) {
+  chrome.storage.local.get("journeyHistory", function (data) {
+    const history = (Array.isArray(data.journeyHistory) ? data.journeyHistory : []).map(VulnscanJourneys.normalize).filter(Boolean);
+    if (selectNewest && !activeJourney && history.length) selectedJourney = history[0];
+    if (!journeyHistoryListEl) return;
+    if (!history.length) {
+      journeyHistoryListEl.innerHTML = '<div class="empty-hint">No saved journeys yet.</div>';
+      if (!activeJourney) renderJourney(null);
+      return;
+    }
+    journeyHistoryListEl.innerHTML = history.map(function (journey, index) {
+      return '<div class="journey-history-item"><div><strong>' + escapeHtml(journey.name) + '</strong><small>' + escapeHtml(journey.origin) + " · " + journey.pages.length + " pages · " + journey.apiEndpoints.length + " APIs · " + new Date(journey.startedAt).toLocaleString() + '</small></div><div class="journey-history-actions"><button class="btn-mini journey-open" data-index="' + index + '">Open</button><button class="btn-mini journey-rename" data-index="' + index + '">Rename</button><button class="btn-mini journey-delete" data-index="' + index + '">Delete</button></div></div>';
+    }).join("");
+    journeyHistoryListEl.querySelectorAll(".journey-open").forEach(function (button) {
+      button.addEventListener("click", function () {
+        selectedJourney = history[Number.parseInt(button.getAttribute("data-index"), 10)];
+        findingContext = "journey";
+        renderJourney(selectedJourney);
+      });
+    });
+    journeyHistoryListEl.querySelectorAll(".journey-rename").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const index = Number.parseInt(button.getAttribute("data-index"), 10);
+        const name = prompt("Journey name", history[index].name);
+        if (name === null || !name.trim()) return;
+        history[index].name = name.trim().slice(0, 80);
+        chrome.storage.local.set({ journeyHistory: history }, function () { loadJourneyHistory(false); });
+      });
+    });
+    journeyHistoryListEl.querySelectorAll(".journey-delete").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const index = Number.parseInt(button.getAttribute("data-index"), 10);
+        const removed = history[index];
+        history.splice(index, 1);
+        if (selectedJourney && removed && selectedJourney.journeyId === removed.journeyId) selectedJourney = history[0] || null;
+        chrome.storage.local.set({ journeyHistory: history }, function () { loadJourneyHistory(false); renderJourney(selectedJourney); });
+      });
+    });
+    if (selectNewest && selectedJourney) renderJourney(selectedJourney);
+  });
+}
+
+async function loadJourneyState() {
+  const response = await runtimeMessage({ type: "journey_get_state" });
+  activeJourney = response.active ? VulnscanJourneys.normalize(response.journey) : null;
+  if (activeJourney) {
+    selectedJourney = activeJourney;
+    findingContext = "journey";
+    renderJourney(activeJourney);
+  } else loadJourneyHistory(true);
+}
+
+async function startJourney() {
+  if (scanning || activeJourney) return;
+  let tab = getCachedSelectedTab();
+  if (!tab || !tab.url || !Number.isInteger(tab.id)) {
+    setStatus("// select a normal website tab first");
+    return;
+  }
+  let origin;
+  try { origin = new URL(tab.url).origin; } catch (e) { setStatus("// selected tab URL is invalid"); return; }
+  if (!/^https?:\/\//.test(tab.url)) {
+    setStatus("// Journey Capture supports normal HTTP and HTTPS pages");
+    return;
+  }
+  startJourneyBtn.disabled = true;
+  setStatus("// requesting access to " + origin);
+  try {
+    const granted = await requestSitePermission([origin + "/*"]);
+    if (!granted) {
+      setStatus("// permission denied for this site");
+      return;
+    }
+    tab = await getSelectedTab();
+    if (!tab || !tab.url || new URL(tab.url).origin !== origin) {
+      setStatus("// selected tab changed sites — start the journey again");
+      await removeSitePermission([origin + "/*"]);
+      return;
+    }
+    const response = await runtimeMessage({
+      type: "journey_begin",
+      journeyId: "j" + Date.now(),
+      tabId: tab.id,
+      origin: origin,
+      url: tab.url,
+      title: tab.title || ""
+    });
+    if (response.error) throw new Error(response.error);
+    activeJourney = VulnscanJourneys.normalize(response.journey);
+    selectedJourney = activeJourney;
+    findingContext = "journey";
+    renderJourney(activeJourney);
+    setStatus("// Journey Capture started — browse the selected origin normally");
+  } catch (error) {
+    setStatus("// could not start journey: " + error.message);
+    await removeSitePermission([origin + "/*"]);
+  } finally {
+    startJourneyBtn.disabled = false;
+  }
+}
+
+async function stopJourney(discard) {
+  if (!activeJourney) return;
+  const response = await runtimeMessage({ type: discard ? "journey_discard" : "journey_finish" });
+  if (response.error) {
+    setStatus("// could not stop journey: " + response.error);
+    return;
+  }
+  activeJourney = null;
+  selectedJourney = response.journey ? VulnscanJourneys.normalize(response.journey) : null;
+  renderJourney(selectedJourney);
+  loadJourneyHistory(!discard);
+  setStatus(discard ? "// journey discarded and site access released" : "// journey saved and site access released");
+}
+
 function loadTabs() {
   return new Promise(function (resolve) {
     chrome.runtime.sendMessage({ type: "list_tabs" }, function (response) {
@@ -2107,6 +2576,10 @@ async function waitForScanResult(scanId, pageUrl) {
 
 async function runScan() {
   if (scanning) return;
+  if (activeJourney) {
+    setStatus("// finish or discard the active journey before running an assessment");
+    return;
+  }
   scanning = true;
   scanBtn.disabled = true;
   scanModeEl.disabled = true;
@@ -2426,7 +2899,7 @@ function downloadBlob(content, type, filename) {
 
 function exportFilename(scan, label, extension) {
   let host = "report";
-  try { host = new URL(scan && scan.url ? scan.url : "").hostname || host; } catch (e) {}
+  try { host = new URL(scan && (scan.url || scan.origin) ? scan.url || scan.origin : "").hostname || host; } catch (e) {}
   host = host.toLowerCase().replace(/[^a-z0-9.-]+/g, "-").replace(/^-+|-+$/g, "") || "report";
   const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/:/g, "-");
   return "vulnscan-" + host + "-" + label + "-" + stamp + "." + extension;
@@ -2544,7 +3017,7 @@ function buildMarkdownReport(scan) {
 
 function buildJsonReport(scan) {
   return {
-    reportVersion: "6.4",
+    reportVersion: "6.5",
     schemaVersion: 8,
     url: scan.url,
     scanId: scan.scanId,
@@ -2564,7 +3037,124 @@ function buildJsonReport(scan) {
   };
 }
 
+function journeyFindingExport(finding) {
+  return Object.assign(exportInvestigation(finding), {
+    pageRefs: (finding.pageRefs || []).slice(),
+    pageCount: Number(finding.pageCount) || 0,
+    pageOccurrences: (finding.pageOccurrences || []).map(function (item) {
+      return {
+        pageRef: item.pageRef,
+        detail: item.detail,
+        evidence: item.evidence,
+        location: item.location,
+        occurrences: item.occurrences,
+        lastSeenAt: item.lastSeenAt
+      };
+    })
+  });
+}
+
+function buildJourneyJson(journey) {
+  const item = VulnscanJourneys.normalize(journey);
+  if (!item) return null;
+  return {
+    reportVersion: "6.5",
+    reportType: "journey",
+    journeySchemaVersion: 1,
+    journeyId: item.journeyId,
+    name: item.name,
+    origin: item.origin,
+    startedAt: item.startedAt,
+    endedAt: item.endedAt,
+    status: item.status,
+    stopReason: item.stopReason,
+    risk: item.risk,
+    summary: item.summary,
+    limits: item.limits,
+    pages: item.pages,
+    apiEndpoints: item.apiEndpoints,
+    findings: item.findings.map(journeyFindingExport),
+    events: item.events,
+    surface: item.surface,
+    secretsRedacted: true
+  };
+}
+
+function buildJourneyMarkdown(journey) {
+  const item = VulnscanJourneys.normalize(journey);
+  if (!item) return "# VulnScan Journey Report\n\nNo journey is available.\n";
+  const findings = item.findings.filter(function (finding) { return finding.bucket === "finding"; });
+  const review = item.findings.filter(function (finding) { return finding.bucket === "review"; });
+  const pageById = new Map(item.pages.map(function (page) { return [page.id, page]; }));
+  let markdown = "# VulnScan Journey Report\n\n";
+  markdown += "## Summary\n\n| Field | Value |\n| --- | --- |\n";
+  markdown += "| Name | " + markdownText(item.name || "Journey") + " |\n";
+  markdown += "| Authorized origin | " + markdownText(item.origin) + " |\n";
+  markdown += "| Started | " + markdownText(new Date(item.startedAt).toISOString()) + " |\n";
+  markdown += "| Finished | " + markdownText(item.endedAt ? new Date(item.endedAt).toISOString() : "Still recording") + " |\n";
+  markdown += "| Outcome | " + markdownText(item.stopReason || item.status) + " |\n";
+  markdown += "| Risk | " + markdownText(String(item.risk || "info").toUpperCase()) + " |\n";
+  markdown += "| Pages | " + item.pages.length + " |\n| API routes | " + item.apiEndpoints.length + " |\n";
+  markdown += "| Actionable findings | " + findings.length + " |\n| Review items | " + review.length + " |\n\n";
+  const limitsReached = Object.keys(item.limits).filter(function (key) { return item.limits[key]; });
+  markdown += "## Coverage\n\n";
+  markdown += "Passive capture covered one top-level tab on the exact authorized origin. Cross-origin API traffic and request or response bodies were not collected.\n\n";
+  markdown += limitsReached.length ? "**Collection limits reached:** " + limitsReached.map(markdownText).join(", ") + ".\n\n" : "No journey collection limits were reached.\n\n";
+  markdown += "## Navigation and lifecycle\n\n";
+  const timeline = item.events.filter(function (event) { return event.kind === "session" || event.kind === "navigation"; });
+  markdown += timeline.length ? timeline.map(function (event) { return "- `" + markdownText(new Date(event.timestamp).toISOString()) + "` **" + markdownText(journeyEventLabel(event)) + "** " + markdownText(journeyEventMessage(event)); }).join("\n") + "\n\n" : "No navigation events were retained.\n\n";
+  markdown += "## Pages\n\n" + (item.pages.length ? item.pages.map(function (page) {
+    return "- **" + markdownText(page.title || page.route) + "** — " + markdownText(page.route) + " (" + page.visits + " visit" + (page.visits === 1 ? "" : "s") + ")";
+  }).join("\n") + "\n\n" : "No pages recorded.\n\n");
+  markdown += "## Same-origin API routes\n\n" + (item.apiEndpoints.length ? item.apiEndpoints.map(function (endpoint) {
+    const statuses = Object.keys(endpoint.statuses).map(function (status) { return status + " × " + endpoint.statuses[status]; }).join(", ") || "no response";
+    const average = endpoint.occurrences ? Math.round(endpoint.durationTotalMs / endpoint.occurrences) : 0;
+    return "- `" + markdownText(endpoint.method) + "` " + markdownText(endpoint.route) + " — " + endpoint.occurrences + " request" + (endpoint.occurrences === 1 ? "" : "s") + ", " + statuses + ", " + average + " ms average";
+  }).join("\n") + "\n\n" : "No same-origin API routes recorded.\n\n");
+  function appendJourneyFindings(title, entries, empty) {
+    markdown += "## " + title + " (" + entries.length + ")\n\n";
+    if (!entries.length) { markdown += empty + "\n\n"; return; }
+    entries.forEach(function (finding, index) {
+      const guidance = VulnscanGuidance.get(finding);
+      const routes = (finding.pageRefs || []).map(function (pageRef) { return pageById.get(pageRef); }).filter(Boolean).map(function (page) { return page.route; });
+      markdown += "### " + (index + 1) + ". [" + markdownText(finding.severity.toUpperCase()) + "] " + markdownText(finding.type) + "\n\n";
+      markdown += markdownText(finding.detail) + "\n\n- **Confidence:** " + markdownText(finding.confidence) + "\n";
+      markdown += "- **Affected pages:** " + (routes.length ? routes.map(markdownText).join("; ") : "Not recorded") + "\n";
+      markdown += "- **Evidence:** " + markdownText(finding.evidence || "No additional evidence recorded.") + "\n";
+      markdown += "- **Why it matters:** " + markdownText(guidance.impact) + "\n- **Recommended action:** " + markdownText(guidance.remediation) + "\n";
+      markdown += "- **How to verify:** " + markdownText(finding.verification || guidance.steps[0] || "Review manually.") + "\n\n";
+    });
+  }
+  appendJourneyFindings("Findings", findings, "No actionable findings.");
+  appendJourneyFindings("Review", review, "No additional review items.");
+  markdown += "> URLs and secret evidence are redacted. The separate full-secret export is session-only and should be handled securely.\n";
+  return markdown;
+}
+
+function buildJourneyLog(journey) {
+  const item = VulnscanJourneys.normalize(journey);
+  if (!item) return "";
+  return [
+    "VulnScan Redacted Journey Capture",
+    "Origin: " + item.origin,
+    "Started: " + new Date(item.startedAt).toISOString(),
+    "Events: " + item.events.length,
+    "",
+    item.events.map(VulnscanJourneys.logLine).join("\n"),
+    "",
+    "Sensitive values, query values, credentials, fragments, bodies, cookies, and headers are not included.",
+    ""
+  ].join("\n");
+}
+
 function exportRedactedMarkdown() {
+  if (activeView === "journey") {
+    const journey = journeyForView();
+    if (!journey) { setStatus("// nothing to export"); return; }
+    downloadBlob(buildJourneyMarkdown(journey), "text/markdown", exportFilename(journey, "journey", "md"));
+    setStatus("// redacted journey report exported");
+    return;
+  }
   if (!lastScanData) {
     setStatus("// nothing to export");
     return;
@@ -2574,6 +3164,13 @@ function exportRedactedMarkdown() {
 }
 
 function exportRedactedJson() {
+  if (activeView === "journey") {
+    const journey = journeyForView();
+    if (!journey) { setStatus("// nothing to export"); return; }
+    downloadBlob(JSON.stringify(buildJourneyJson(journey), null, 2) + "\n", "application/json", exportFilename(journey, "journey", "json"));
+    setStatus("// redacted journey JSON exported");
+    return;
+  }
   if (!lastScanData) {
     setStatus("// nothing to export");
     return;
@@ -2597,6 +3194,21 @@ function buildSecretExport(scan, vault, createdAt) {
 }
 
 function exportRawSecrets() {
+  if (activeView === "journey") {
+    const journey = journeyForView();
+    if (!journey) { setStatus("// nothing to export"); return; }
+    chrome.runtime.sendMessage({ type: "get_journey_secrets", journeyId: journey.journeyId, origin: journey.origin }, function (response) {
+      const vault = Array.from(new Set((response && response.secrets) || []));
+      if (!(response && response.available) || !vault.length) {
+        setStatus("// raw values are unavailable — only the latest matching journey in this browser session can export them");
+        return;
+      }
+      const scanShape = { url: journey.origin, scanId: journey.journeyId };
+      downloadBlob(buildSecretExport(scanShape, vault, new Date().toISOString()), "text/plain", exportFilename(journey, "journey-full-secrets", "txt"));
+      setStatus("// full journey secret values exported — handle the file securely");
+    });
+    return;
+  }
   getExportSecrets(function (vault, available) {
     if (!available || !vault.length) {
       setStatus("// raw values are unavailable — run a fresh scan with a matching target");
@@ -2614,9 +3226,16 @@ exportBtn.addEventListener("click", function () {
 });
 exportMarkdownBtn.addEventListener("click", function () { exportMenu.hidden = true; exportRedactedMarkdown(); });
 exportJsonBtn.addEventListener("click", function () { exportMenu.hidden = true; exportRedactedJson(); });
+if (exportJourneyLogBtn) exportJourneyLogBtn.addEventListener("click", function () {
+  exportMenu.hidden = true;
+  const journey = journeyForView();
+  if (!journey) { setStatus("// nothing to export"); return; }
+  downloadBlob(buildJourneyLog(journey), "text/plain", exportFilename(journey, "capture", "log"));
+  setStatus("// redacted capture log exported");
+});
 exportSecretsBtn.addEventListener("click", function () {
   exportMenu.hidden = true;
-  if (!lastScanData) { setStatus("// nothing to export"); return; }
+  if (activeView === "journey" ? !journeyForView() : !lastScanData) { setStatus("// nothing to export"); return; }
   secretExportCheck.checked = false;
   secretExportConfirm.disabled = true;
   secretExportModal.hidden = false;
@@ -2628,9 +3247,20 @@ document.querySelectorAll(".nav-btn").forEach(function (button) {
     document.querySelectorAll(".view").forEach(function (view) { view.classList.remove("active"); });
     button.classList.add("active");
     const name = button.getAttribute("data-view");
+    activeView = name;
     const view = document.getElementById("view-" + name);
     if (view) view.classList.add("active");
     if (name === "history") loadHistory();
+    if (name === "journey") {
+      findingContext = "journey";
+      loadJourneyState();
+      loadJourneyHistory(false);
+    } else if (name === "scan") findingContext = "scan";
+    if (scanControls) scanControls.hidden = name !== "scan";
+    if (scanBtn) scanBtn.hidden = name !== "scan";
+    if (clearBtn) clearBtn.hidden = name !== "scan";
+    if (cancelScanBtn && name !== "scan") cancelScanBtn.hidden = true;
+    if (exportJourneyLogBtn) exportJourneyLogBtn.hidden = name !== "journey" || !journeyForView();
   });
 });
 
@@ -2736,6 +3366,100 @@ if (clearChecksBtn) {
 
 scanBtn.addEventListener("click", runScan);
 clearBtn.addEventListener("click", clearResults);
+if (startJourneyBtn) startJourneyBtn.addEventListener("click", function () {
+  startJourney().catch(function (error) { setStatus("// could not start journey: " + error.message); });
+});
+if (finishJourneyBtn) finishJourneyBtn.addEventListener("click", function () { stopJourney(false); });
+if (discardJourneyBtn) discardJourneyBtn.addEventListener("click", function () {
+  if (confirm("Discard this journey and release site access?")) stopJourney(true);
+});
+if (openJourneyMapBtn) openJourneyMapBtn.addEventListener("click", function () {
+  const journey = journeyForView();
+  if (journey) openJourneyMap(journey, openJourneyMapBtn, null, "flow");
+});
+if (deleteJourneyHistoryBtn) deleteJourneyHistoryBtn.addEventListener("click", function () {
+  if (!confirm("Delete all saved journeys?")) return;
+  chrome.storage.local.set({ journeyHistory: [] }, function () {
+    if (!activeJourney) selectedJourney = null;
+    loadJourneyHistory(false);
+    renderJourney(activeJourney);
+    setStatus("// saved journeys deleted");
+  });
+});
+document.querySelectorAll(".console-filter").forEach(function (button) {
+  button.addEventListener("click", function () {
+    document.querySelectorAll(".console-filter").forEach(function (item) { item.classList.toggle("active", item === button); });
+    consoleFilter = button.getAttribute("data-console-kind") || "all";
+    consoleFollowing = true;
+    consoleUnseen = 0;
+    renderCaptureConsole(true);
+  });
+});
+if (consoleSearchEl) consoleSearchEl.addEventListener("input", function () {
+  consoleSearch = consoleSearchEl.value.trim().toLowerCase();
+  consoleFollowing = true;
+  consoleUnseen = 0;
+  renderCaptureConsole(true);
+});
+if (consolePauseBtn) consolePauseBtn.addEventListener("click", function () {
+  consolePaused = !consolePaused;
+  consolePauseBtn.textContent = consolePaused ? "Resume output" : "Pause output";
+  consolePauseBtn.classList.toggle("active", consolePaused);
+  if (!consolePaused) {
+    consoleFollowing = true;
+    consoleUnseen = 0;
+    if (consoleNewEvents) consoleNewEvents.hidden = true;
+    renderCaptureConsole(true);
+  }
+});
+if (consoleWrapBtn) consoleWrapBtn.addEventListener("click", function () {
+  captureConsole.classList.toggle("wrap");
+  consoleWrapBtn.classList.toggle("active", captureConsole.classList.contains("wrap"));
+});
+if (consoleExpandBtn) consoleExpandBtn.addEventListener("click", function () {
+  captureConsole.classList.remove("collapsed");
+  captureConsole.classList.toggle("expanded");
+  consoleExpandBtn.textContent = captureConsole.classList.contains("expanded") ? "Restore" : "Expand";
+});
+if (consoleCollapseBtn) consoleCollapseBtn.addEventListener("click", function () {
+  captureConsole.classList.remove("expanded");
+  captureConsole.classList.toggle("collapsed");
+  consoleExpandBtn.textContent = "Expand";
+  consoleCollapseBtn.textContent = captureConsole.classList.contains("collapsed") ? "Open" : "Collapse";
+});
+if (consoleClearFocus) consoleClearFocus.addEventListener("click", function () {
+  consoleFocus = null;
+  consoleClearFocus.hidden = true;
+  consoleFollowing = true;
+  consoleUnseen = 0;
+  renderCaptureConsole(true);
+});
+if (consoleLogEl) consoleLogEl.addEventListener("scroll", function () {
+  const distance = consoleLogEl.scrollHeight - consoleLogEl.scrollTop - consoleLogEl.clientHeight;
+  consoleFollowing = distance <= 12;
+});
+if (consoleNewEvents) consoleNewEvents.addEventListener("click", function () {
+  consoleFollowing = true;
+  consoleUnseen = 0;
+  consoleNewEvents.hidden = true;
+  renderCaptureConsole(true);
+});
+if (captureConsoleResize) captureConsoleResize.addEventListener("pointerdown", function (event) {
+  if (captureConsole.classList.contains("expanded") || captureConsole.classList.contains("collapsed")) return;
+  const startY = event.clientY;
+  const startHeight = captureConsole.getBoundingClientRect().height;
+  const move = function (next) {
+    const height = Math.max(190, Math.min(700, startHeight + startY - next.clientY));
+    captureConsole.style.height = height + "px";
+  };
+  const finish = function () {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", finish);
+    chrome.storage.local.set({ journeyConsoleHeight: captureConsole.style.height });
+  };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", finish);
+});
 cancelScanBtn.addEventListener("click", function () {
   scanCancelled = true;
   if (currentRequestController) currentRequestController.cancel();
@@ -2772,8 +3496,13 @@ if (findingTriageState) {
     const finding = findingByFingerprint(activeFindingFingerprint);
     if (!finding) return;
     saveTriageState(finding, findingTriageState.value);
-    applyFilter();
-    renderInvestigationQueue();
+    if (findingContext === "journey") {
+      renderJourneyResults(selectedJourney);
+      renderJourneyHotspots(selectedJourney);
+    } else {
+      applyFilter();
+      renderInvestigationQueue();
+    }
     openFindingDrawer(finding.fingerprint);
     setStatus("Finding workflow updated to " + triageLabel(findingTriageState.value));
   });
@@ -2785,8 +3514,11 @@ if (toggleQueueBtn) {
     const pinned = !workflowFor(finding).pinned;
     saveWorkflowState(finding, { pinned: pinned });
     toggleQueueBtn.textContent = pinned ? "Remove from queue" : "Add to queue";
-    renderInvestigationQueue();
-    applyFilter();
+    if (findingContext === "journey") renderJourneyResults(selectedJourney);
+    else {
+      renderInvestigationQueue();
+      applyFilter();
+    }
     setStatus(pinned ? "Finding added to the investigation queue" : "Finding removed from the investigation queue");
   });
 }
@@ -2811,21 +3543,26 @@ if (showAffectedBtn) {
 if (showFindingMapBtn) {
   showFindingMapBtn.addEventListener("click", function () {
     const finding = findingByFingerprint(activeFindingFingerprint);
-    if (!finding || !lastScanData) return;
+    if (!finding || (findingContext === "journey" ? !selectedJourney : !lastScanData)) return;
     const returnFocus = drawerReturnFocus || showFindingMapBtn;
     closeFindingDrawer();
-    openScanMap(lastScanData, returnFocus, "map-finding-" + finding.fingerprint);
+    if (findingContext === "journey") openJourneyMap(selectedJourney, returnFocus, "map-journey-finding-" + finding.identityFingerprint, "surface");
+    else openScanMap(lastScanData, returnFocus, "map-finding-" + finding.fingerprint);
   });
 }
 
 if (clearAllDataBtn) {
   clearAllDataBtn.addEventListener("click", function () {
-    chrome.storage.local.remove(["lastScan", "scanHistory", "requestBudget", "enabledChecks", "findingTriage"], function () {
+    chrome.storage.local.remove(["lastScan", "scanHistory", "journeyHistory", "requestBudget", "enabledChecks", "findingTriage", "journeyConsoleHeight"], function () {
       chrome.runtime.sendMessage({ type: "clear_all_session" }, function (response) {
         triageStates = {};
         applySavedChecks(VulnscanChecks.all());
         clearResults();
+        activeJourney = null;
+        selectedJourney = null;
+        renderJourney(null);
         historyList.innerHTML = '<div class="empty-hint">No history yet</div>';
+        if (journeyHistoryListEl) journeyHistoryListEl.innerHTML = '<div class="empty-hint">No saved journeys yet.</div>';
         setStatus(response && response.siteAccessCleared === false
           ? "// saved scan data cleared, but site access could not be removed"
           : "// all saved scan data and site access cleared");
@@ -2966,6 +3703,62 @@ if (scanMapMiniMap) {
   });
 }
 
+if (chrome.runtime.onMessage) chrome.runtime.onMessage.addListener(function (message) {
+  if (!message || !/^journey_/.test(message.type || "")) return;
+  if (message.type === "journey_event") {
+    if (!activeJourney || message.journeyId !== activeJourney.journeyId || !message.event) return;
+    const item = VulnscanJourneys.event(message.event);
+    if (activeJourney.events.some(function (event) { return event.sequence === item.sequence; })) return;
+    activeJourney.events.push(item);
+    activeJourney.events.sort(function (left, right) { return left.sequence - right.sequence; });
+    activeJourney.nextSequence = Math.max(activeJourney.nextSequence, item.sequence + 1);
+    if (item.pageRef) activeJourney.currentPageRef = item.pageRef;
+    selectedJourney = activeJourney;
+    if (consolePaused || !consoleFollowing) {
+      consoleUnseen++;
+      if (consoleNewEvents) {
+        consoleNewEvents.textContent = consoleUnseen + " new event" + (consoleUnseen === 1 ? "" : "s");
+        consoleNewEvents.hidden = false;
+      }
+      if (consoleEventCount) consoleEventCount.textContent = activeJourney.events.length + " events";
+    } else renderCaptureConsole(false);
+    return;
+  }
+  if (message.type !== "journey_state_changed") return;
+  if (message.state === "recording" && message.journey) {
+    const nextJourney = VulnscanJourneys.normalize(message.journey);
+    const previousSequence = activeJourney && activeJourney.events.length ? activeJourney.events[activeJourney.events.length - 1].sequence : 0;
+    const newCount = nextJourney ? nextJourney.events.filter(function (event) { return event.sequence > previousSequence; }).length : 0;
+    activeJourney = nextJourney;
+    selectedJourney = activeJourney;
+    findingContext = "journey";
+    if ((consolePaused || !consoleFollowing) && newCount) {
+      consoleUnseen += newCount;
+      if (consoleNewEvents) {
+        consoleNewEvents.textContent = consoleUnseen + " new event" + (consoleUnseen === 1 ? "" : "s");
+        consoleNewEvents.hidden = false;
+      }
+    }
+    renderJourney(activeJourney);
+    return;
+  }
+  if (message.state === "complete") {
+    activeJourney = null;
+    selectedJourney = VulnscanJourneys.normalize(message.journey);
+    findingContext = "journey";
+    renderJourney(selectedJourney);
+    loadJourneyHistory(false);
+    setStatus("// journey saved and site access released");
+    return;
+  }
+  if (message.state === "discarded") {
+    activeJourney = null;
+    selectedJourney = null;
+    renderJourney(null);
+    loadJourneyHistory(true);
+  }
+});
+
 document.addEventListener("keydown", function (event) {
   if (event.key === "Escape" && scanMapDialog && !scanMapDialog.hidden) {
     closeScanMap();
@@ -2977,8 +3770,8 @@ document.addEventListener("keydown", function (event) {
   }
   if (event.target.tagName === "INPUT" || event.target.tagName === "TEXTAREA") return;
   const key = event.key.toLowerCase();
-  if (key === "s") { event.preventDefault(); runScan(); }
-  if (key === "c") { event.preventDefault(); clearResults(); }
+  if (key === "s" && activeView === "scan") { event.preventDefault(); runScan(); }
+  if (key === "c" && activeView === "scan") { event.preventDefault(); clearResults(); }
   if (key === "e") { event.preventDefault(); exportRedactedMarkdown(); }
 });
 
@@ -2986,7 +3779,7 @@ chrome.storage.local.get("lastScan", function (data) {
   if (!data.lastScan) return;
   if (!renderFindings(data.lastScan)) {
     chrome.storage.local.remove("lastScan", function () {
-      setStatus("This saved result needs a fresh v6.4 scan — the incompatible cache was cleared");
+      setStatus("This saved result needs a fresh v6.5 scan — the incompatible cache was cleared");
     });
   }
 });
@@ -3018,5 +3811,9 @@ chrome.storage.local.get("findingTriage", function (data) {
     renderInvestigationQueue();
   }
 });
+chrome.storage.local.get("journeyConsoleHeight", function (data) {
+  if (captureConsole && /^\d{3}px$/.test(data.journeyConsoleHeight || "")) captureConsole.style.height = data.journeyConsoleHeight;
+});
 updateModeHelp();
 loadTabs();
+loadJourneyState().catch(function () {});

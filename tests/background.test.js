@@ -7,6 +7,8 @@ const vm = require("node:vm");
 const modelSource = fs.readFileSync(path.join(__dirname, "..", "finding-model.js"), "utf8");
 const urlSource = fs.readFileSync(path.join(__dirname, "..", "url-utils.js"), "utf8");
 const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
+const journeySource = fs.readFileSync(path.join(__dirname, "..", "journey-model.js"), "utf8");
+const headerSource = fs.readFileSync(path.join(__dirname, "..", "header-analysis.js"), "utf8");
 const backgroundSource = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
 
 function createWorker(shared) {
@@ -20,7 +22,9 @@ function createWorker(shared) {
       onBeforeRequest: { addListener: function (listener) { listeners.beforeRequest = listener; } },
       onBeforeSendHeaders: { addListener: function (listener) { listeners.beforeSendHeaders = listener; } },
       onHeadersReceived: { addListener: function (listener) { listeners.headers = listener; } },
-      onBeforeRedirect: { addListener: function (listener) { listeners.redirect = listener; } }
+      onBeforeRedirect: { addListener: function (listener) { listeners.redirect = listener; } },
+      onCompleted: { addListener: function (listener) { listeners.completed = listener; } },
+      onErrorOccurred: { addListener: function (listener) { listeners.requestError = listener; } }
     },
     action: { onClicked: { addListener: function () {} } },
     alarms: {
@@ -51,6 +55,7 @@ function createWorker(shared) {
       onMessage: { addListener: function (listener) { listeners.message = listener; } },
       onInstalled: { addListener: function (listener) { listeners.installed = listener; } },
       onStartup: { addListener: function (listener) { listeners.startup = listener; } },
+      sendMessage: function (message, callback) { state.broadcasts = (state.broadcasts || []).concat(message); if (callback) callback(); },
       lastError: null
     },
     storage: {
@@ -69,7 +74,12 @@ function createWorker(shared) {
       },
       session: {
         set: function (value, callback) { Object.assign(state.session, value); if (callback) callback(); },
-        get: function (key, callback) { callback({ [key]: state.session[key] }); },
+        get: function (key, callback) {
+          const keys = Array.isArray(key) ? key : [key];
+          const result = {};
+          keys.forEach(function (name) { result[name] = state.session[name]; });
+          callback(result);
+        },
         remove: function (key, callback) {
           (Array.isArray(key) ? key : [key]).forEach(function (name) { delete state.session[name]; });
           if (callback) callback();
@@ -80,18 +90,21 @@ function createWorker(shared) {
       query: async function () { return []; },
       update: async function () {},
       create: async function () {},
-      get: function () {},
+      get: function (tabId, callback) { callback(state.tabs && state.tabs[tabId] || null); },
       onRemoved: { addListener: function (listener) { listeners.removed = listener; } },
       onReplaced: { addListener: function (listener) { listeners.replaced = listener; } },
       onUpdated: { addListener: function (listener) { listeners.updated = listener; } }
     },
-    windows: { update: async function () {} }
+    windows: { update: async function () {} },
+    scripting: { executeScript: function (options, callback) { if (callback) callback([]); } }
   };
-  const context = { chrome: chrome, URL: URL, Date: Date, importScripts: function () {} };
+  const context = { chrome: chrome, URL: URL, Date: Date, Math: Math, setTimeout: setTimeout, clearTimeout: clearTimeout, importScripts: function () {} };
   vm.createContext(context);
   vm.runInContext(modelSource, context);
   vm.runInContext(urlSource, context);
   vm.runInContext(checkSource, context);
+  vm.runInContext(journeySource, context);
+  vm.runInContext(headerSource, context);
   vm.runInContext(backgroundSource, context);
 
   function send(message, sender) {
@@ -105,11 +118,15 @@ function createWorker(shared) {
       if (pending !== true && !resolved) resolve(undefined);
     });
   }
-  return { state: state, listeners: listeners, send: send, model: context.VulnscanFindings };
+  return { state: state, listeners: listeners, send: send, model: context.VulnscanFindings, journey: context.VulnscanJourneys };
 }
 
 function contentSender(tabId, url) {
   return { tab: { id: tabId }, url: url };
+}
+
+function tick() {
+  return new Promise(function (resolve) { setTimeout(resolve, 10); });
 }
 
 test("keeps raw secrets in session storage across worker restarts", async function () {
@@ -466,4 +483,150 @@ test("scopes outgoing CORS evidence to the active scan and exact origin", async 
     originMatchesExtension: true,
     originWasNull: false
   });
+});
+
+test("journey capture requires an exact-origin grant and saves a redacted completed session", async function () {
+  const shared = {
+    local: {}, session: {}, grantedOrigins: ["https://example.test/*"],
+    tabs: { 9: { id: 9, url: "https://example.test/account/123?token=secret", title: "Account" } }
+  };
+  const worker = createWorker(shared);
+  const denied = await worker.send({ type: "journey_begin", journeyId: "denied", tabId: 4, origin: "https://denied.test", url: "https://denied.test/" });
+  assert.equal(denied.error, "Exact-origin access is required");
+
+  const started = await worker.send({
+    type: "journey_begin", journeyId: "journey-save", tabId: 9, origin: "https://example.test",
+    url: "https://example.test/account/123?token=secret", title: "Account"
+  });
+  assert.equal(started.ok, true);
+  await tick();
+  const captureId = Object.keys(shared.session.journeyCaptures)[0];
+  assert.ok(captureId);
+  assert.equal(shared.session.journeyCaptures[captureId].url, undefined);
+  assert.doesNotMatch(JSON.stringify(shared.session.journeyCaptures), /token|secret/);
+  worker.listeners.headers({
+    tabId: 9, type: "main_frame", url: "https://example.test/account/123?token=secret", statusCode: 200,
+    responseHeaders: [{ name: "set-cookie", value: "session=raw-cookie; Path=/; SameSite=Lax" }]
+  });
+  const page = await worker.send({
+    type: "journey_page_results", journeyId: "journey-save", captureId: captureId,
+    url: "https://example.test/account/123?token=secret", title: "Account", findings: [], surface: { nodes: [], edges: [] }
+  }, contentSender(9, "https://example.test/account/123?token=secret"));
+  assert.equal(page.ok, true);
+  const duplicate = await worker.send({
+    type: "journey_page_results", journeyId: "journey-save", captureId: captureId,
+    url: "https://example.test/account/123?token=secret", title: "Account", findings: [], surface: { nodes: [], edges: [] }
+  }, contentSender(9, "https://example.test/account/123?token=secret"));
+  assert.equal(duplicate.error, "Journey capture mismatch");
+  await worker.send({
+    type: "journey_export_secrets", journeyId: "journey-save", captureId: captureId,
+    url: "https://example.test/account/123?token=secret", secrets: ["raw-provider-secret"]
+  }, contentSender(9, "https://example.test/account/123?token=secret"));
+  const finished = await worker.send({ type: "journey_finish" });
+  assert.equal(finished.saved, true);
+  assert.equal(shared.local.journeyHistory.length, 1);
+  const serialized = JSON.stringify(shared.local.journeyHistory[0]);
+  assert.doesNotMatch(serialized, /secret|raw-cookie|raw-provider/);
+  assert.match(serialized, /token=%5Bredacted%5D/);
+  assert.equal(shared.grantedOrigins.includes("https://example.test/*"), false);
+  assert.deepEqual(Array.from(shared.session.secretVault.secrets), ["raw-provider-secret"]);
+});
+
+test("restores a live journey after a worker restart", async function () {
+  const shared = {
+    local: {}, session: {}, grantedOrigins: ["https://example.test/*"],
+    tabs: { 5: { id: 5, url: "https://example.test/app", title: "App" } }
+  };
+  const first = createWorker(shared);
+  await first.send({ type: "journey_begin", journeyId: "journey-restart", tabId: 5, origin: "https://example.test", url: "https://example.test/app" });
+  const restarted = createWorker(shared);
+  const state = await restarted.send({ type: "journey_get_state" });
+  assert.equal(state.active, true);
+  assert.equal(state.journey.events.some(function (event) { return event.kind === "session" && event.phase === "restored"; }), true);
+  await restarted.send({ type: "journey_discard" });
+});
+
+test("serializes overlapping API completions and aggregates sanitized endpoints", async function () {
+  const shared = {
+    local: {}, session: {}, grantedOrigins: ["https://example.test/*"],
+    tabs: { 6: { id: 6, url: "https://example.test/app", title: "App" } }
+  };
+  const worker = createWorker(shared);
+  await worker.send({ type: "journey_begin", journeyId: "journey-api", tabId: 6, origin: "https://example.test", url: "https://example.test/app" });
+  worker.listeners.beforeRequest({ requestId: "one", tabId: 6, type: "xmlhttprequest", url: "https://example.test/api/users/1?key=one", method: "GET", timeStamp: 1000 });
+  worker.listeners.beforeRequest({ requestId: "two", tabId: 6, type: "xmlhttprequest", url: "https://example.test/api/users/2?key=two", method: "GET", timeStamp: 1002 });
+  worker.listeners.completed({ requestId: "two", tabId: 6, type: "xmlhttprequest", statusCode: 204, timeStamp: 1020 });
+  worker.listeners.completed({ requestId: "one", tabId: 6, type: "xmlhttprequest", statusCode: 200, timeStamp: 1030 });
+  await tick();
+  const state = await worker.send({ type: "journey_get_state" });
+  assert.equal(state.journey.apiEndpoints.length, 1);
+  assert.equal(state.journey.apiEndpoints[0].occurrences, 2);
+  assert.deepEqual(Object.assign({}, state.journey.apiEndpoints[0].statuses), { 200: 1, 204: 1 });
+  const sequences = state.journey.events.map(function (event) { return event.sequence; });
+  assert.deepEqual(sequences, sequences.slice().sort(function (left, right) { return left - right; }));
+  assert.doesNotMatch(JSON.stringify(state.journey), /key=one|key=two/);
+  await worker.send({ type: "journey_discard" });
+});
+
+test("finishes a partial journey when its tab leaves the authorized origin", async function () {
+  const shared = {
+    local: {}, session: {}, grantedOrigins: ["https://example.test/*"],
+    tabs: { 7: { id: 7, url: "https://example.test/start", title: "Start" } }
+  };
+  const worker = createWorker(shared);
+  await worker.send({ type: "journey_begin", journeyId: "journey-leave", tabId: 7, origin: "https://example.test", url: "https://example.test/start" });
+  worker.listeners.updated(7, { url: "https://outside.test/" }, { id: 7, url: "https://outside.test/" });
+  await tick();
+  assert.equal(shared.local.journeyHistory.length, 1);
+  assert.equal(shared.local.journeyHistory[0].stopReason, "origin-changed");
+  assert.equal(shared.session.journeyDraft, undefined);
+  assert.equal(shared.grantedOrigins.includes("https://example.test/*"), false);
+});
+
+test("ignores late API completions after a journey is discarded", async function () {
+  const shared = {
+    local: {}, session: {}, grantedOrigins: ["https://example.test/*"],
+    tabs: { 8: { id: 8, url: "https://example.test/app", title: "App" } }
+  };
+  const worker = createWorker(shared);
+  await worker.send({ type: "journey_begin", journeyId: "journey-late", tabId: 8, origin: "https://example.test", url: "https://example.test/app" });
+  worker.listeners.beforeRequest({ requestId: "late", tabId: 8, type: "xmlhttprequest", url: "https://example.test/api/work", method: "POST", timeStamp: 1000 });
+  await tick();
+  await worker.send({ type: "journey_discard" });
+  worker.listeners.completed({ requestId: "late", tabId: 8, type: "xmlhttprequest", statusCode: 200, timeStamp: 1200 });
+  await tick();
+  assert.equal(shared.session.journeyDraft, undefined);
+  assert.equal(shared.session.journeyInflight, undefined);
+  assert.equal(shared.local.journeyHistory, undefined);
+});
+
+test("expires and saves a partial journey when state is restored after its time limit", async function () {
+  const shared = {
+    local: {}, session: {}, grantedOrigins: ["https://example.test/*"],
+    tabs: { 10: { id: 10, url: "https://example.test/start", title: "Start" } }
+  };
+  const worker = createWorker(shared);
+  await worker.send({ type: "journey_begin", journeyId: "journey-timeout", tabId: 10, origin: "https://example.test", url: "https://example.test/start" });
+  shared.session.journeyDraft.expiresAt = Date.now() - 1;
+  const restarted = createWorker(shared);
+  const state = await restarted.send({ type: "journey_get_state" });
+  assert.equal(state.active, false);
+  assert.equal(state.journey.stopReason, "time-limit");
+  assert.equal(shared.local.journeyHistory[0].stopReason, "time-limit");
+  assert.equal(shared.grantedOrigins.includes("https://example.test/*"), false);
+});
+
+test("retries exact-origin removal after a completed journey", async function () {
+  const shared = {
+    local: {}, session: {}, grantedOrigins: ["https://example.test/*"], permissionRemoveFailures: 1,
+    tabs: { 11: { id: 11, url: "https://example.test/start", title: "Start" } }
+  };
+  const worker = createWorker(shared);
+  await worker.send({ type: "journey_begin", journeyId: "journey-retry", tabId: 11, origin: "https://example.test", url: "https://example.test/start" });
+  const finished = await worker.send({ type: "journey_finish" });
+  assert.equal(finished.siteAccessReleased, false);
+  assert.ok(shared.alarms["vulnscan-site-access"]);
+  worker.listeners.alarm({ name: "vulnscan-site-access" });
+  await tick();
+  assert.equal(shared.grantedOrigins.includes("https://example.test/*"), false);
 });

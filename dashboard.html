@@ -14,13 +14,14 @@
         <div class="logo" aria-hidden="true">V</div>
         <div>
           <div class="brand-name">VULN<span>SCAN</span></div>
-          <div id="brandVersion" class="brand-ver">v6.2.0</div>
+          <div id="brandVersion" class="brand-ver">v6.5.0</div>
           <div class="brand-by">Security workspace</div>
         </div>
       </div>
 
       <nav class="nav">
         <button class="nav-btn active" data-view="scan">Assessment</button>
+        <button class="nav-btn" data-view="journey">Journey</button>
         <button class="nav-btn" data-view="history">History</button>
         <button class="nav-btn" data-view="about">About</button>
       </nav>
@@ -57,6 +58,7 @@
             <div id="exportMenu" class="export-menu" hidden>
               <button id="exportMarkdownBtn">Redacted Markdown</button>
               <button id="exportJsonBtn">Redacted JSON</button>
+              <button id="exportJourneyLogBtn" hidden>Redacted capture log</button>
               <button id="exportSecretsBtn">Full secret values</button>
             </div>
           </div>
@@ -65,7 +67,7 @@
         </div>
       </header>
 
-      <div class="scan-controls">
+      <div id="scanControls" class="scan-controls">
         <div class="control-field">
           <span class="control-label">MODE</span>
           <details id="scanModePicker" class="mode-picker">
@@ -257,6 +259,86 @@
         </div>
       </section>
 
+      <!-- JOURNEY VIEW -->
+      <section id="view-journey" class="view">
+        <div class="journey-command">
+          <div>
+            <div class="journey-eyebrow">PASSIVE SESSION WORKSPACE</div>
+            <h1>Journey Capture</h1>
+            <p>Use the selected site normally while Vulnscan records redacted page, finding, and same-origin API evidence.</p>
+          </div>
+          <div class="journey-actions">
+            <button id="startJourneyBtn" class="btn primary">Start journey</button>
+            <button id="finishJourneyBtn" class="btn primary" hidden>Finish and save</button>
+            <button id="discardJourneyBtn" class="btn danger" hidden>Discard</button>
+            <button id="openJourneyMapBtn" class="btn ghost" hidden>Open journey map</button>
+          </div>
+        </div>
+
+        <div id="journeyRecordingBar" class="journey-recording" hidden>
+          <span class="recording-dot" aria-hidden="true"></span>
+          <strong>RECORDING</strong>
+          <span id="journeyOrigin">No origin selected</span>
+          <span id="journeyElapsed">00:00</span>
+          <span id="journeyCurrentRoute" class="journey-current-route">Waiting for a page</span>
+        </div>
+
+        <div class="stats-row journey-stats">
+          <div class="stat-card"><div class="stat-label">PAGES</div><div id="journeyPages" class="stat-value">0</div></div>
+          <div class="stat-card"><div class="stat-label">API ROUTES</div><div id="journeyApis" class="stat-value">0</div></div>
+          <div class="stat-card high"><div class="stat-label">FINDINGS</div><div id="journeyFindings" class="stat-value">0</div></div>
+          <div class="stat-card info"><div class="stat-label">REVIEW</div><div id="journeyReview" class="stat-value">0</div></div>
+          <div class="stat-card"><div class="stat-label">EVENTS</div><div id="journeyEvents" class="stat-value">0</div></div>
+        </div>
+
+        <div id="journeyNotice" class="journey-notice">Select a normal website tab and start a journey. Capture stays on that exact origin and creates no requests of its own.</div>
+
+        <div class="journey-grid">
+          <div class="panel journey-results-panel">
+            <div class="panel-head"><span>JOURNEY RESULTS</span><span id="journeyResultSummary" class="panel-note">No journey loaded</span></div>
+            <div id="journeyResultList" class="panel-body journey-result-list"><div class="empty-hint">Findings from visited pages will be grouped here.</div></div>
+          </div>
+          <div class="panel journey-hotspots-panel">
+            <div class="panel-head"><span>HOTSPOTS</span></div>
+            <div id="journeyHotspots" class="panel-body"><div class="empty-hint">No page hotspots yet.</div></div>
+          </div>
+        </div>
+
+        <div id="captureConsole" class="capture-console">
+          <div id="captureConsoleResize" class="console-resize" role="separator" aria-orientation="horizontal" aria-label="Resize capture console"></div>
+          <div class="console-head">
+            <div class="console-title"><span class="console-status-dot"></span><strong>LIVE CAPTURE CONSOLE</strong><span id="consoleEventCount">0 events</span></div>
+            <div class="console-actions">
+              <button id="consolePauseBtn" class="btn-mini">Pause output</button>
+              <button id="consoleWrapBtn" class="btn-mini">Wrap</button>
+              <button id="consoleExpandBtn" class="btn-mini">Expand</button>
+              <button id="consoleCollapseBtn" class="btn-mini">Collapse</button>
+            </div>
+          </div>
+          <div id="consoleTools" class="console-tools">
+            <div class="console-filters" role="group" aria-label="Capture event type">
+              <button class="console-filter active" data-console-kind="all">All</button>
+              <button class="console-filter" data-console-kind="navigation">Navigation</button>
+              <button class="console-filter" data-console-kind="page">Pages</button>
+              <button class="console-filter" data-console-kind="api">APIs</button>
+              <button class="console-filter" data-console-kind="finding">Findings</button>
+              <button class="console-filter" data-console-kind="system">System</button>
+            </div>
+            <input id="consoleSearch" type="search" placeholder="Filter captured events" aria-label="Filter captured events">
+            <button id="consoleClearFocus" class="btn-mini" hidden>Show all events</button>
+          </div>
+          <div id="consoleLog" class="console-log" aria-label="Ordered capture events" tabindex="0">
+            <div class="console-empty">Waiting for Journey Capture to start.</div>
+          </div>
+          <button id="consoleNewEvents" class="console-new-events" hidden>0 new events</button>
+        </div>
+
+        <div class="panel journey-history-panel">
+          <div class="panel-head"><span>SAVED JOURNEYS</span><button id="deleteJourneyHistoryBtn" class="btn-mini">Delete all</button></div>
+          <div id="journeyHistoryList" class="panel-body"><div class="empty-hint">No saved journeys yet.</div></div>
+        </div>
+      </section>
+
       <!-- HISTORY VIEW -->
       <section id="view-history" class="view">
         <div class="panel">
@@ -275,7 +357,7 @@
         <div class="panel about-panel">
           <div class="panel-head"><span>ABOUT</span></div>
           <div class="panel-body about-body">
-            <p><strong>Vulnscan Security Workspace</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v6.4.1</strong>.</p>
+            <p><strong>Vulnscan Security Workspace</strong> is a controlled browser security scanner. Installed version: <strong id="aboutVersion">v6.5.0</strong>.</p>
             <ul>
               <li><strong>Passive</strong> inspects the loaded page without sending scanner-generated requests.</li>
               <li><strong>Safe Active</strong> allows same-origin GET, HEAD, and OPTIONS checks within a request budget.</li>
@@ -285,6 +367,7 @@
               <li><strong>Scan comparison</strong> highlights new, changed, resolved, and unchanged results against the last matching scan.</li>
               <li><strong>Investigation view</strong> adds impact, remediation, verification steps, technical metadata, and a local workflow state to every result.</li>
               <li><strong>Interactive scan map</strong> connects observed surfaces, scan stages, checks, and related results.</li>
+              <li><strong>Journey Capture</strong> follows one authorized tab and records a redacted, passive view of page changes, same-origin API metadata, and grouped findings.</li>
               <li><strong>Guided exploitability</strong> explains prerequisites, safe validation, and evidence that may disprove a finding.</li>
               <li><strong>Cross-browser builds</strong> support desktop Chrome and Firefox from the same source.</li>
             </ul>
@@ -359,6 +442,8 @@
           <option value="external-origin">External origins</option>
           <option value="storage">Storage names</option>
           <option value="authentication">Authentication</option>
+          <option value="page">Pages</option>
+          <option value="api-endpoint">API endpoints</option>
         </select>
         <select id="scanMapBucket" aria-label="Filter result type">
           <option value="all">Findings + Review</option>
@@ -446,6 +531,7 @@
 
   <script src="finding-model.js"></script>
   <script src="url-utils.js"></script>
+  <script src="journey-model.js"></script>
   <script src="finding-guidance.js"></script>
   <script src="scan-checks.js"></script>
   <script src="request-controller.js"></script>

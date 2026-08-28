@@ -10,6 +10,7 @@ const guidanceSource = fs.readFileSync(path.join(__dirname, "..", "finding-guida
 const checkSource = fs.readFileSync(path.join(__dirname, "..", "scan-checks.js"), "utf8");
 const requestSource = fs.readFileSync(path.join(__dirname, "..", "request-controller.js"), "utf8");
 const mapSource = fs.readFileSync(path.join(__dirname, "..", "scan-map.js"), "utf8");
+const journeySource = fs.readFileSync(path.join(__dirname, "..", "journey-model.js"), "utf8");
 const dashboardSource = fs.readFileSync(path.join(__dirname, "..", "dashboard.js"), "utf8");
 
 function createElement(id, attributes) {
@@ -26,6 +27,10 @@ function createElement(id, attributes) {
     style: {},
     listeners: {},
     attributes: attributes || {},
+    children: [],
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 100,
     classList: {
       add: function () {},
       remove: function () {},
@@ -33,11 +38,13 @@ function createElement(id, attributes) {
       toggle: function () {}
     },
     addEventListener: function (name, listener) { element.listeners[name] = listener; },
+    appendChild: function (child) { element.children.push(child); element.scrollHeight = element.children.length * 24; return child; },
     querySelector: function () { return null; },
     querySelectorAll: function () { return []; },
     removeAttribute: function () {},
     getAttribute: function (name) { return element.attributes[name] || null; },
     setAttribute: function (name, value) { element.attributes[name] = value; },
+    focus: function () {},
     click: function () { if (element.listeners.click) element.listeners.click({ preventDefault: function () {} }); }
   };
   return element;
@@ -57,6 +64,9 @@ function createDashboard() {
     createElement("filter-all", { "data-sev": "all" }),
     createElement("filter-high", { "data-sev": "high" })
   ];
+  const consoleButtons = ["all", "navigation", "page", "api", "finding", "system"].map(function (kind) {
+    return createElement("console-" + kind, { "data-console-kind": kind });
+  });
   const modeInputs = [
     createElement("mode-passive"),
     createElement("mode-safe"),
@@ -107,18 +117,20 @@ function createDashboard() {
     querySelectorAll: function (selector) {
       if (selector === ".bucket-filter") return bucketButtons;
       if (selector === ".filter") return filterButtons;
+      if (selector === ".console-filter") return consoleButtons;
       if (selector === "input[name='scanModeChoice']") return modeInputs;
       if (selector === ".check-toggle") return checkToggles;
       return [];
     },
     addEventListener: function () {},
-    createElement: function () { return createElement("download"); }
+    createElement: function () { return createElement("download"); },
+    activeElement: null
   };
   const chrome = {
     runtime: {
       lastError: null,
       getURL: function (value) { return "chrome-extension://test/" + (value || ""); },
-      getManifest: function () { return { version: "6.4.1" }; },
+      getManifest: function () { return { version: "6.5.0" }; },
       onMessage: { addListener: function (listener) { runtimeListener = listener; } },
       sendMessage: function (message, callback) {
         sentMessages.push(message);
@@ -134,6 +146,7 @@ function createDashboard() {
           response = { ok: true };
         }
         if (message.type === "get_request_log") response = savedRequestLog;
+        if (message.type === "journey_get_state") response = { active: false, journey: null };
         if (message.type === "scan_begin") currentScanId = message.scanId;
         if (message.type === "scan_end") response = {
           ok: true,
@@ -226,6 +239,10 @@ function createDashboard() {
     TextDecoder: TextDecoder,
     setTimeout: setTimeout,
     clearTimeout: clearTimeout,
+    setInterval: setInterval,
+    clearInterval: clearInterval,
+    confirm: function () { return true; },
+    prompt: function (label, value) { return value; },
     console: console
   };
   vm.createContext(context);
@@ -235,12 +252,14 @@ function createDashboard() {
   vm.runInContext(checkSource, context);
   vm.runInContext(requestSource, context);
   vm.runInContext(mapSource, context);
+  vm.runInContext(journeySource, context);
   vm.runInContext(dashboardSource, context);
   return {
     context: context,
     element: element,
     bucketButtons: bucketButtons,
     filterButtons: filterButtons,
+    consoleButtons: consoleButtons,
     modeInputs: modeInputs,
     checkToggles: checkToggles,
     runtimeListener: function () { return runtimeListener; },
@@ -697,7 +716,7 @@ test("redacted reports never include raw secret values", function () {
   dashboard.setExportSecrets({ secrets: [raw], available: true });
   assert.doesNotMatch(dashboard.context.buildMarkdownReport(scan), new RegExp(raw));
   assert.doesNotMatch(JSON.stringify(dashboard.context.buildJsonReport(scan)), new RegExp(raw));
-  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.4");
+  assert.equal(dashboard.context.buildJsonReport(scan).reportVersion, "6.5");
   assert.equal(dashboard.sentMessages.some(function (message) { return message.type === "get_export_secrets"; }), false);
 
   dashboard.element("exportSecretsBtn").listeners.click();
@@ -771,6 +790,85 @@ test("full-secret text export separates values and includes handling context", f
   assert.match(text, /Values: 2/);
   assert.match(text, /--- Value 1 of 2 ---\nStripe: raw-one/);
   assert.match(text, /--- Value 2 of 2 ---\nGitHub: raw-two/);
+});
+
+test("journey exports are structured, redacted, and readable", function () {
+  const dashboard = createDashboard();
+  const journeys = dashboard.context.VulnscanJourneys;
+  const findingModel = dashboard.context.VulnscanFindings;
+  const journey = journeys.create({ journeyId: "journey-report", origin: "https://example.test", tabId: 3, startedAt: 1000 });
+  journeys.noteNavigation(journey, { url: "https://example.test/users/123?token=raw-query", title: "Users", timestamp: 1100 });
+  journeys.mergePageResults(journey, {
+    url: "https://example.test/users/123?token=raw-query", title: "Users", timestamp: 1200,
+    findings: [findingModel.normalize({
+      checkId: "dom.flow", severity: "medium", confidence: "medium", bucket: "finding", category: "xss",
+      type: "DOM source-to-sink flow", detail: "A source reaches a sink.", evidence: "Redacted flow evidence.", verification: "Trace manually.", source: "passive"
+    })]
+  });
+  journeys.recordApi(journey, { url: "https://example.test/api/users/456?authorization=raw-api", method: "GET", status: 200, durationMs: 18, timestamp: 1300 });
+  journeys.finalize(journey, "finished", 1400);
+  vm.runInContext("findingContext = 'journey'", dashboard.context);
+  dashboard.context.renderJourney(journey);
+  const report = dashboard.context.buildJourneyJson(journey);
+  const json = JSON.stringify(report);
+  const markdown = dashboard.context.buildJourneyMarkdown(journey);
+  const log = dashboard.context.buildJourneyLog(journey);
+  assert.equal(report.reportVersion, "6.5");
+  assert.equal(report.reportType, "journey");
+  assert.equal(report.journeySchemaVersion, 1);
+  assert.doesNotMatch(json + markdown + log, /raw-query|raw-api|authorization=raw/);
+  assert.match(markdown, /Navigation and lifecycle/);
+  assert.match(markdown, /Same-origin API routes/);
+  assert.match(log, /VulnScan Redacted Journey Capture/);
+});
+
+test("live console uses text nodes for event content and buffers paused output", function () {
+  const dashboard = createDashboard();
+  const journeys = dashboard.context.VulnscanJourneys;
+  const journey = journeys.create({ journeyId: "journey-console", origin: "https://example.test", tabId: 3, startedAt: 1000 });
+  journeys.noteNavigation(journey, { url: "https://example.test/app", timestamp: 1100 });
+  dashboard.context.testJourney = journey;
+  vm.runInContext("activeJourney = testJourney; selectedJourney = activeJourney", dashboard.context);
+  dashboard.context.renderJourney(journey);
+  const log = dashboard.element("consoleLog");
+  assert.equal(log.children.some(function (row) { return row.children && row.children.some(function (part) { return /https:\/\/example\.test\/app/.test(part.textContent); }); }), true);
+  assert.doesNotMatch(log.innerHTML, /example\.test/);
+  dashboard.element("consolePauseBtn").listeners.click();
+  dashboard.runtimeListener()({
+    type: "journey_event", journeyId: "journey-console",
+    event: { sequence: 2, timestamp: 1200, kind: "error", phase: "error", level: "error", route: "https://example.test/app", details: { reason: "capture-failed" } }
+  });
+  assert.equal(dashboard.element("consoleNewEvents").hidden, false);
+  assert.equal(dashboard.element("consoleNewEvents").textContent, "1 new event");
+  dashboard.element("consolePauseBtn").listeners.click();
+  assert.equal(dashboard.element("consoleNewEvents").hidden, true);
+});
+
+test("live console filters structured events and suspends follow after scrolling up", function () {
+  const dashboard = createDashboard();
+  const journeys = dashboard.context.VulnscanJourneys;
+  const journey = journeys.create({ journeyId: "journey-filter", origin: "https://example.test", tabId: 3, startedAt: 1000 });
+  const page = journeys.noteNavigation(journey, { url: "https://example.test/app", timestamp: 1100 });
+  journeys.recordApi(journey, { url: "https://example.test/api/items", method: "GET", pageRef: page.id, status: 200, durationMs: 12, timestamp: 1200 });
+  dashboard.context.testJourney = journey;
+  vm.runInContext("activeJourney = testJourney; selectedJourney = activeJourney", dashboard.context);
+  dashboard.context.renderJourney(journey);
+  const log = dashboard.element("consoleLog");
+  log.children = [];
+  dashboard.consoleButtons.find(function (button) { return button.getAttribute("data-console-kind") === "api"; }).listeners.click();
+  const rows = log.children.filter(function (row) { return /console-row/.test(row.className); });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].children[2].textContent, "API ←");
+  log.scrollHeight = 500;
+  log.clientHeight = 100;
+  log.scrollTop = 50;
+  log.listeners.scroll();
+  dashboard.runtimeListener()({
+    type: "journey_event", journeyId: "journey-filter",
+    event: { sequence: 3, timestamp: 1300, kind: "api", phase: "error", level: "error", route: "https://example.test/api/items", method: "GET", outcome: "error" }
+  });
+  assert.equal(dashboard.element("consoleNewEvents").hidden, false);
+  assert.equal(dashboard.element("consoleNewEvents").textContent, "1 new event");
 });
 
 test("opens a detailed investigation and persists its local workflow state", function () {

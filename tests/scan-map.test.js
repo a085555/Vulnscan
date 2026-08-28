@@ -127,3 +127,32 @@ test("sanitized SVG export contains labels but no scripts or finding evidence", 
   assert.doesNotMatch(svg, /sensitive evidence should stay out|<script/i);
   assert.match(svg, /^<svg/);
 });
+
+test("journey maps link pages, API endpoints, and grouped findings", function () {
+  const finding = model.normalize({
+    checkId: "dom.flow", severity: "medium", confidence: "medium", bucket: "finding", category: "xss",
+    type: "DOM flow", detail: "source reaches sink", evidence: "bounded evidence", verification: "trace manually", source: "passive"
+  });
+  finding.pageRefs = ["jp-11111111"];
+  finding.pageCount = 1;
+  finding.pageOccurrences = [];
+  const journey = {
+    origin: "https://example.test",
+    name: "Example journey",
+    pages: [{ id: "jp-11111111", route: "https://example.test/app", title: "App", firstSeenAt: 1, visits: 2 }],
+    apiEndpoints: [{ id: "ja-22222222", method: "GET", route: "https://example.test/api/items/:id", occurrences: 3, statuses: { 200: 3 }, pageRefs: ["jp-11111111"] }],
+    findings: [finding],
+    surface: { nodes: [], edges: [] },
+    limits: {}
+  };
+  const flow = map.buildJourney(journey, "flow", {});
+  const page = flow.nodes.find(function (node) { return node.kind === "page"; });
+  const api = flow.nodes.find(function (node) { return node.kind === "api-endpoint"; });
+  const findingNode = flow.nodes.find(function (node) { return node.kind === "finding"; });
+  assert.ok(page && api && findingNode);
+  assert.equal(flow.edges.some(function (edge) { return edge.from === page.id && edge.to === api.id && edge.relation === "requested"; }), true);
+  assert.equal(flow.edges.some(function (edge) { return edge.from === page.id && edge.to === findingNode.id && edge.relation === "observed on"; }), true);
+  const apiOnly = map.buildJourney(journey, "surface", { kind: "api-endpoint" });
+  assert.equal(apiOnly.nodes.some(function (node) { return node.kind === "api-endpoint"; }), true);
+  assert.equal(apiOnly.nodes.some(function (node) { return node.kind === "page"; }), true, "page anchors remain visible for endpoint filters");
+});
